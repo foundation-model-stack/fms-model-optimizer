@@ -35,7 +35,7 @@ dependencies = [
 "tqdm==4.66.3",
 "tensorboard==2.8.0",
 "notebook",
-"matplotlib==3.4.3",
+"matplotlib==3.9.2",
 "torchvision>=0.8",
 "graphviz",
 "cGraph==0.1",
