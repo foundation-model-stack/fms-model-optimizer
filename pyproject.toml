@@ -33,7 +33,7 @@ dependencies = [
 "torch>=2.2.1",
 "numpy",
 "tqdm==4.66.3",
-"tensorboard==2.8.0",
+"tensorboard==2.18.0",
 "notebook",
 "matplotlib==3.4.3",
 "torchvision>=0.8",
