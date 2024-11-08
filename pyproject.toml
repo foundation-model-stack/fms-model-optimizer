@@ -40,7 +40,7 @@ dependencies = [
 "graphviz",
 "cGraph==0.1",
 "transformers",
-"packaging==24.0"
+"packaging==24.2"
 ]
 
 [tool.setuptools.packages.find]
