@@ -32,7 +32,7 @@ classifiers=[
 dependencies = [
 "torch>=2.2.1",
 "numpy",
-"tqdm==4.66.3",
+"tqdm==4.67.1",
 "tensorboard==2.8.0",
 "notebook",
 "matplotlib==3.4.3",
