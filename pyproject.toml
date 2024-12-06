@@ -38,7 +38,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pre-commit>=3.0.4,<4.0"]
+dev = ["pre-commit>=3.0.4,<5.0"]
 fp8 = ["llmcompressor"]
 gptq = ["auto_gptq"]
 visualize = ["matplotlib", "graphviz", "pygraphviz"]
