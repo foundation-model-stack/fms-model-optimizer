@@ -72,17 +72,36 @@ class ObserverPercentile(nn.Module):
         with torch.no_grad():
             x = inputs[0].detach()  # TODO: still need detach() under no_grad context?
 
+            symmetric = False
+            if module.quantize_feature:
+                # default to asymmetric clip_val computation
+                # TODO: this misses symmetry of PACTPlusSym, PACT2Sym, and QFixSymmetric
+                symmetric = not getattr(module.quantize_feature, "minmax", True)
+
             nelem = x.nelement()
             if self.a_init_method == "percentile":
                 lower_k = int(self.per[0] * nelem)
-                lower_per_cur = (
+                lower_per_cur_candidate = (
                     x.reshape(1, -1).kthvalue(lower_k).values.data[0]
                     if lower_k > 0
                     else x.min()
                 )  # guard rail: tensors with very few elements could cause kthvalue(0) error
-                upper_per_cur = (
+                upper_per_cur_candidate = (
                     x.reshape(1, -1).kthvalue(int(self.per[1] * nelem)).values.data[0]
                 )
+                if symmetric:
+                    upper_per_cur = (
+                        upper_per_cur_candidate
+                        if upper_per_cur_candidate > lower_per_cur_candidate.abs()
+                        else lower_per_cur_candidate.abs()
+                    )
+                    lower_per_cur = -upper_per_cur
+                else:
+                    upper_per_cur = upper_per_cur_candidate
+                    lower_per_cur = lower_per_cur_candidate
+            elif symmetric:
+                upper_per_cur = x.abs().max()
+                lower_per_cur = -upper_per_cur
             else:
                 lower_per_cur = x.min()
                 upper_per_cur = x.max()

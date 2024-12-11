@@ -162,12 +162,17 @@ class QLinear(nn.Linear):
                 use_subnormal=self.fp8_use_subnormal,
             )
             if self.calib_counter > 0:
+                qa_mode_calib = (
+                    self.qa_mode_calib + "sym"
+                    if self.qa_mode.endswith("sym")
+                    else self.qa_mode_calib
+                )
                 self.quantize_calib_feature = Qdynamic(
                     self.num_bits_feature,
                     qcfg,
                     non_neg=self.non_neg,
                     align_zero=self.align_zero,
-                    qmode=self.qa_mode_calib,
+                    qmode=qa_mode_calib,
                     quantizer2sync=self.quantize_feature,
                 )
 

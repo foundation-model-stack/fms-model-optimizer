@@ -3512,7 +3512,7 @@ class Qdynamic(nn.Module):
         """
         super().__init__()
         self.num_bits = num_bits
-        self.symmetric = symmetric or qmode.endswith("_sym")
+        self.symmetric = symmetric or qmode.endswith("sym")
         self.nlevels = (
             2**self.num_bits - 2 if self.symmetric else 2**self.num_bits - 1
         )
@@ -3553,7 +3553,7 @@ class Qdynamic(nn.Module):
         with torch.no_grad():
             if self.qmode.startswith("percentile"):
                 nelem = input_tensor.nelement()
-                cv_new = (
+                cv_new_candidate = (
                     input_tensor.reshape(1, -1)
                     .float()
                     .kthvalue(
@@ -3561,16 +3561,28 @@ class Qdynamic(nn.Module):
                     )  # built-in 'round' returns int
                     .values.data[0]
                 ).to(input_tensor.dtype)
+
                 # conventionaly percentile is input_tensor as 99.9 (% is implied),
                 # so we need *0.01 here
                 lower_k = round(self.per[0] * 0.01 * nelem)
-                cvn_new = (
+                cvn_new_candidate = (
                     input_tensor.reshape(1, -1).float().kthvalue(lower_k).values.data[0]
                     if lower_k > 0
                     else input_tensor.min()
                 ).to(
                     input_tensor.dtype
                 )  # for very small tensor, lower_k could be 0, kthvalue(0) will cause error
+
+                if self.symmetric:
+                    cv_new = (
+                        cv_new_candidate
+                        if cv_new_candidate > cvn_new_candidate.abs()
+                        else cvn_new_candidate.abs()
+                    )
+                    cvn_new = -cv_new
+                else:
+                    cv_new = cv_new_candidate
+                    cvn_new = cvn_new_candidate
             elif (
                 self.qmode == "sawb" and self.num_bits == 4
             ):  # only works for PACT+sym for weights
@@ -3579,7 +3591,7 @@ class Qdynamic(nn.Module):
 
             else:  # i.e., minmax
                 cv_new = input_tensor.max()
-                cvn_new = input_tensor.min()
+                cvn_new = -cv_new if self.symmetric else input_tensor.min()
 
             if self.Niter == 0 and self.training:
                 # to avoid unintended bwd ops added to the graph, cause memory leak sometimes
