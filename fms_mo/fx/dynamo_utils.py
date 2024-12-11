@@ -15,18 +15,17 @@
 in FX IR, i.e. the GraphModule received in dynamo custom backend. Older version based on TorchScript
 can be found in fms_mo/utils.
 """
+
 # Standard
 import logging
 
 # Third Party
 import torch
 
-# Local
-from fms_mo.fx.utils import (
-    get_org_mod_name_of_fx_node,
-    get_target_op_from_mod_or_str,
-    get_target_op_from_node,
-)
+# First Party
+from fms_mo.fx.utils import (get_org_mod_name_of_fx_node,
+                             get_target_op_from_mod_or_str,
+                             get_target_op_from_node)
 
 logger = logging.getLogger(__name__)
 
@@ -214,9 +213,9 @@ def dfs_gm(
         org_mod_names = {}
         for n_ln, d in node_found.items():
             n, line_num = n_ln  # unpack tuple
-            org_mod_names[
-                get_org_mod_name_of_fx_node(n, gm), line_num
-            ] = d  # see Note 2
+            org_mod_names[get_org_mod_name_of_fx_node(n, gm), line_num] = (
+                d  # see Note 2
+            )
 
         return dict(
             sorted(org_mod_names.items(), key=lambda item: item[1])
@@ -255,7 +254,6 @@ def find_conv_on_shortcut_gm(gm: torch.fx.GraphModule):
     qconv_candidate = []
     search_limit = 20
     for node_i, _ in nodes_add:
-
         if any(
             ("embed" in ni.name or "embed" in str(ni.target))
             for ni in node_i.all_input_nodes
@@ -461,7 +459,6 @@ def find_single_sided_op_gm(
     search_limit = 10
     Nundetermined = sum(v is None for v in isActOutPositiveOnly.values())
     while Nundetermined > 0 and loop_counter < search_limit:
-
         # Step 2: go through all the nodes ONCE and try our best to determine their 'polarity'
         for n in gm.graph.nodes:
             if n.op in ["placeholder", "output"]:
@@ -925,7 +922,7 @@ def model_analyzer(
                             break
 
         if plotsvg:
-            # Local
+            # First Party
             from fms_mo.fx.utils import plot_graph_module
 
             if not isinstance(plotsvg, str):
@@ -1062,7 +1059,7 @@ def model_analyzer(
 
     # b) qbmm creation and attaching to model
     if qcfg.get("QBmm"):  # see Note 4
-        # Local
+        # First Party
         from fms_mo.modules import QBmm
 
         qcfg["which2patch_contextmanager"] = qcfg["bmm_prep"][

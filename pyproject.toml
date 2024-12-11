@@ -43,6 +43,11 @@ fp8 = ["llmcompressor"]
 gptq = ["auto_gptq"]
 visualize = ["matplotlib", "graphviz", "pygraphviz"]
 
+[project.urls]
+homepage = "https://github.com/foundation-model-stack/fms-model-optimizer"
+source = "https://github.com/foundation-model-stack/fms-model-optimizer"
+issues = "https://github.com/foundation-model-stack/fms-model-optimizer/issues"
+
 [tool.setuptools_scm]
 version_file = "fms_mo/_version.py"
 # do not include +gREV local version, required for Test PyPI upload
@@ -52,7 +57,67 @@ local_scheme = "no-local-version"
 where = [""]
 include = ["fms_mo", "fms_mo*"]
 
-[project.urls]
-homepage = "https://github.com/foundation-model-stack/fms-model-optimizer"
-source = "https://github.com/foundation-model-stack/fms-model-optimizer"
-issues = "https://github.com/foundation-model-stack/fms-model-optimizer/issues"
+[tool.ruff]
+target-version = "py310"
+# same as black's default line length
+line-length = 88
+
+[tool.ruff.lint]
+# Allow fix for all enabled rules (when `--fix`) is provided.
+fixable = ["ALL"]
+unfixable = []
+# modern type annotations
+extend-safe-fixes = ["UP006", "UP007"]
+
+# Fixers will be enabled gradually.
+select = [
+  "B", # flake8-bugbear
+  "E", # pycodestyle
+  "F", # Pyflakes
+  "Q", # flake8-quotes
+  # Ruff does not support isort's import_headings feature, yet.
+  # "I",   # isort
+  # "UP",  # pyupgrade
+  "SIM", # flake8-simplify
+  "TID", # flake8-tidy-imports
+]
+# Issues should be fixded gradually
+ignore = [
+  "B904", # `raise from err` or `raise from None`
+  "B905", # Without an explicit `strict=` parameter
+  "B006", # Do not use mutable data structures for argument defaults
+  "B007", # Loop control variable not used within loop body
+  "B009", # Do not call `getattr` with a constant attribute value
+  "B010", # Do not call `setattr` with a constant attribute value
+  "B028", # No explicit `stacklevel` keyword argument found
+  "E501", # Line too long
+  "E711", # Comparison to `None` should be `cond is None`
+  "E713", # Test for membership should be `not in`
+  "E714", # Test for object identity should be `is not`
+  "E722", # Do not use bare `except`
+  "E741", # Ambiguous variable name
+  "F401", # imported but unused
+  "F541", # "f-string without any placeholders
+  "F821", # Undefined name
+  "F841", # Local variable is assigned to but never used
+  "SIM102", # Use a single if instead of nested if
+  "SIM108", # Use ternary operator
+  "SIM118", # Use `key in dict` instead of `key in dict.keys()`
+  "SIM201", # Use `fw.data.dtype != dtype` instead of `not fw.data.dtype == dtype`
+  "SIM910", # "Use `config_fp32.get(other_str)` instead of `config_fp32.get(other_str, None)`
+  "TID252", # Prefer absolute imports over relative imports from parent modules
+]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"yamllint".msg = "yamllint is for CLI usage only."
+
+[tool.ruff.lint.isort]
+# same as .isort.cfg
+from-first=true
+# not supported yet
+# import-heading-future=Future
+# import-heading-stdlib=Standard
+# import-heading-thirdparty=Third Party
+# import-heading-firstparty=First Party
+# import-heading-localfolder=Local
+# extend-skip="fms_mo/_version.py"

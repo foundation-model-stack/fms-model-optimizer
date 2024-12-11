@@ -19,13 +19,14 @@
 from typing import Optional, Tuple
 
 # Third Party
-from packaging.version import Version
-from torch import _VF, Tensor, nn
 import torch
 import torch.nn.functional as F
+from packaging.version import Version
+from torch import _VF, Tensor, nn
 
-# Local
-from fms_mo.quant.quantizers import get_activation_quantizer, get_weight_quantizer
+# First Party
+from fms_mo.quant.quantizers import (get_activation_quantizer,
+                                     get_weight_quantizer)
 
 
 class QLSTM(nn.LSTM):
@@ -318,9 +319,7 @@ class QLSTM(nn.LSTM):
         hidden = list(zip(*hidden))
 
         for layer in range(self.num_layers):
-            qoutput_all_ts_bidir = (
-                []
-            )  # For bidirectional LSTM, store outputs of both directions (otherwise stays empty)
+            qoutput_all_ts_bidir = []  # For bidirectional LSTM, store outputs of both directions (otherwise stays empty)
 
             if (
                 layer == 0

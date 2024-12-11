@@ -22,33 +22,28 @@ search_fold_and_remove_bn are modified from QDROP repo https://github.com/wimh96
 """
 
 # Standard
-from functools import partial
-from typing import Optional, Union
 import logging
 import math
 import random
 import sys
+from functools import partial
+from typing import Optional, Union
 
 # Third Party
-from torch.utils.tensorboard import SummaryWriter
-from tqdm import tqdm
 import numpy as np
 import pandas as pd
-
 # from numpy.lib.function_base import iterable
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
 
-# Local
+# First Party
 from fms_mo.modules import QBmm, QLinear
 from fms_mo.modules.conv import QConv2dPTQv2
-from fms_mo.quant.quantizers import (
-    AdaRoundQuantizer,
-    Qdynamic,
-    get_activation_quantizer,
-    lp_loss,
-)
+from fms_mo.quant.quantizers import (AdaRoundQuantizer, Qdynamic,
+                                     get_activation_quantizer, lp_loss)
 from fms_mo.utils.import_utils import available_packages
 from fms_mo.utils.utils import move_to, patch_torch_bmm
 
@@ -477,9 +472,9 @@ class PTQHookRecQOut(nn.Module):
         self.qcfg = qcfg
 
     def __call__(self, mod, x, output):
-        self.qcfg[
-            "cached_qout"
-        ] = output  # hold only 1 and no detach() or cpu(), we need to do backward on this
+        self.qcfg["cached_qout"] = (
+            output  # hold only 1 and no detach() or cpu(), we need to do backward on this
+        )
 
 
 class PTQHookRecGrad(nn.Module):
@@ -946,9 +941,9 @@ def calib_ptq_bn_tune(
                         # special handle for adaround, delta and zp are buffers, not parameters,
                         # use mean() in case perCh
                         cv_sum_table[modname][2] = m.quantize_weight.delta.mean().item()
-                        cv_sum_table[modname][
-                            3
-                        ] = m.quantize_weight.zero_point.mean().item()
+                        cv_sum_table[modname][3] = (
+                            m.quantize_weight.zero_point.mean().item()
+                        )
                         qcfg["tb_writer"].add_scalar(
                             f"{modname}/delta", m.quantize_weight.delta.mean(), Niters
                         )
@@ -979,7 +974,6 @@ def calib_ptq_bn_tune(
     if (
         qcfg["ptq_nbatch"] > 0 and qcfg["ptq_nouterloop"] > 0
     ):  # default Ninner = 1 if not specified
-
         Nsteps2acc = max(
             qcfg.get("PTQ_Nimgs2acc", Nimgs_per_batch) // Nimgs_per_batch, 1
         )
@@ -1469,9 +1463,9 @@ def ptq_mod_optim_lm(_model, m, layers, qcfg, optim_mode="both", **kwargs):
                         scalars2log[f"{mod_name}/{pname}"] = p.item()
                     scalars2log[f"{mod_name}/LR_cvw"] = optim_w.param_groups[1]["lr"]
                 if "adaround" in qcfg["qw_mode"]:
-                    scalars2log[
-                        f"{mod_name}/AdaR_beta"
-                    ] = loss_func.temp_decay.curr_beta
+                    scalars2log[f"{mod_name}/AdaR_beta"] = (
+                        loss_func.temp_decay.curr_beta
+                    )
                     for lidx, l in enumerate(layers):
                         if not hasattr(l, "quantize_m1"):
                             hist2log[f"{mod_name}/W{lidx}"] = l.weight
@@ -2091,9 +2085,9 @@ def cpu_cali(model, dloader, qcfg):
                         qcfg["tb_writer"].add_scalar(f"{modname}/{var_name}", v, Niters)
                 else:
                     cv_sum_table[modname][2] = m.quantize_weight.delta.mean().item()
-                    cv_sum_table[modname][
-                        3
-                    ] = m.quantize_weight.zero_point.mean().item()
+                    cv_sum_table[modname][3] = (
+                        m.quantize_weight.zero_point.mean().item()
+                    )
                     if qcfg["tb_writer"]:
                         qcfg["tb_writer"].add_scalar(
                             f"{modname}/delta", m.quantize_weight.delta.mean(), Niters
@@ -2232,7 +2226,6 @@ def ptq_llm_1gpu(qcfg, model, dloader, local_rank):
     if (
         qcfg["ptq_nbatch"] > 0 and qcfg["ptq_nouterloop"] > 0
     ):  # default Ninner = 1 if not specified
-
         Nsteps2acc = qcfg["PTQ_Nimgs2acc"]
         loss_scaling_acc = 1.0
         Ntotal_iters = qcfg["ptq_nouterloop"] * qcfg["ptq_ninnerloop"]
@@ -2634,7 +2627,7 @@ def reset_bn(module: nn.BatchNorm2d):
 
 
 try:
-    # Local
+    # First Party
     from fms_mo.modules.conv import DetQConv2d
 
     BNofInteret = (

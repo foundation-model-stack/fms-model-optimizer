@@ -24,24 +24,20 @@
 """
 Main entry point for quantize API for GPTQ, FP8 and DQ quantization techniques
 """
+
 # Standard
 import logging
 import time
 
 # Third Party
+import transformers
 from datasets import load_from_disk
 from transformers import AutoTokenizer
-import transformers
 
-# Local
+# First Party
 from fms_mo.dq import run_dq
-from fms_mo.training_args import (
-    DataArguments,
-    FMSMOArguments,
-    FP8Args,
-    GPTQArgs,
-    ModelArguments,
-)
+from fms_mo.training_args import (DataArguments, FMSMOArguments, FP8Args,
+                                  GPTQArgs, ModelArguments)
 from fms_mo.utils.import_utils import available_packages
 
 logger = logging.Logger("fms_mo.main")
@@ -114,7 +110,7 @@ def run_gptq(model_args, data_args, gptq_args, output_dir):
     from auto_gptq.modeling._const import SUPPORTED_MODELS
     from auto_gptq.modeling.auto import GPTQ_CAUSAL_LM_MODEL_MAP
 
-    # Local
+    # First Party
     from fms_mo.utils.custom_gptq_models import custom_gptq_classes
 
     quantize_config = BaseQuantizeConfig(

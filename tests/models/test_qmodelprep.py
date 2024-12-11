@@ -22,7 +22,7 @@ import torch
 import torchvision
 import transformers
 
-# Local
+# First Party
 # fms_mo imports
 from fms_mo import qmodel_prep
 from fms_mo.prep import has_quantized_module

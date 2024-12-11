@@ -11,22 +11,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Main user interfacing functions, such as qmodel_prep()
-
-"""
+"""Main user interfacing functions, such as qmodel_prep()"""
 
 # Standard
-from copy import deepcopy
-from typing import Callable, Tuple, Union
 import logging
 import sys
+from copy import deepcopy
+from typing import Callable, Tuple, Union
 
 # Third Party
+import torch
 from torch import nn
 from transformers.tokenization_utils_base import BatchEncoding
-import torch
 
-# Local
+# First Party
 from fms_mo.modules import QBmm, QConv2d, QConvTranspose2d, QLinear
 from fms_mo.utils.utils import prepare_data_4_fwd, prepare_inputs
 
@@ -186,8 +184,9 @@ class ObserverLSTM(nn.Module):
                 for act, name in [(x, "input"), (hid[layer], "hidden")]:
                     nelem = act.nelement()
                     if self.a_init_method == "percentile":
-                        lower_k, upper_k = int(self.per[0] * nelem), int(
-                            self.per[1] * nelem
+                        lower_k, upper_k = (
+                            int(self.per[0] * nelem),
+                            int(self.per[1] * nelem),
                         )
                         lower_per_cur = (
                             act.reshape(1, -1).kthvalue(lower_k).values.data[0]

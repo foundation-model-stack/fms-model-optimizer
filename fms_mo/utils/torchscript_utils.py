@@ -18,16 +18,16 @@ This file contains utils related to torchscript
 # pylint: disable=c-extension-no-member
 
 # Standard
-from copy import deepcopy
-from typing import List, Tuple
 import logging
 import sys
+from copy import deepcopy
+from typing import List, Tuple
 
 # Third Party
-from transformers.tokenization_utils_base import BatchEncoding
 import torch
+from transformers.tokenization_utils_base import BatchEncoding
 
-# Local
+# First Party
 from fms_mo.modules import QBmm
 from fms_mo.quant.quantizers import transformers_prepare_input
 from fms_mo.utils.import_utils import available_packages
@@ -314,9 +314,7 @@ class Graph:
                 value_node.parents_ptr = [
                     self.dictionary_of_nodes[pi] for pi in value_node.parents
                 ]
-                for (
-                    pi
-                ) in (
+                for pi in (
                     value_node.parents_ptr
                 ):  # Here we can use pointer to parents directly
                     pi.children.append(key_node)

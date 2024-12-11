@@ -11,24 +11,23 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Main user interfacing functions, such as qmodel_prep()
-
-"""
+"""Main user interfacing functions, such as qmodel_prep()"""
 
 # Standard
-from pathlib import Path
 import gc
 import logging
 import sys
 import warnings
+from pathlib import Path
 
 # Third Party
-from torch import nn
 import torch
+from torch import nn
 
-# Local
+# First Party
 from fms_mo.calib import qmodel_calib
-from fms_mo.modules import QBmm_modules, QConv2d_modules, QLinear_modules, QLSTM_modules
+from fms_mo.modules import (QBmm_modules, QConv2d_modules, QLinear_modules,
+                            QLSTM_modules)
 from fms_mo.quant.quantizers import Qbypass
 from fms_mo.utils.qconfig_utils import check_config, qconfig_save
 from fms_mo.utils.utils import prepare_inputs
@@ -503,7 +502,6 @@ def q_any_net_5(model: nn.Module, qcfg: dict, verbose: bool = False):
     from torch.ao.quantization.utils import _parent_name
 
     for name, module in model.named_modules():
-
         parent_module_name, curr_mod_name = _parent_name(name)
         new_module = make_quant_module(module, name, qcfg)
         parent_module = model.get_submodule(parent_module_name)
@@ -692,7 +690,7 @@ def qmodel_prep(
 
     elif use_dynamo:
         # --- Option 2.1 trace the model with dynamo and find candidates to quantize
-        # Local
+        # First Party
         from fms_mo.fx.dynamo_utils import model_analyzer
 
         # TODO: need a more robust 'input parsing', similar to what we used in TS version
@@ -715,7 +713,7 @@ def qmodel_prep(
         #      qcfg['qskip_layer_name'] and qcfg['qsinglesided_name']
     else:
         # --- Option 2.2 trace the model with TorchScript
-        # Local
+        # First Party
         from fms_mo.utils.torchscript_utils import model_analyzer_ts
 
         qskip_layer_name, QsinglesidedConvs = model_analyzer_ts(

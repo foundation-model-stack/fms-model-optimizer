@@ -12,23 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Data preparation functions for GPTQ and directQuant. Get data from different datasets and 
+"""Data preparation functions for GPTQ and directQuant. Get data from different datasets and
 tokenize.
 
 This code is modified from: https://github.com/IST-DASLab/gptq/blob/main/zeroShot/datautils.py
 """
 
 # Standard
-from pathlib import Path
 import json
 import os
 import random
+from pathlib import Path
 
 # Third Party
-from datasets import load_dataset, load_from_disk
-from transformers import AutoTokenizer, BatchEncoding
 import datasets
 import torch
+from datasets import load_dataset, load_from_disk
+from transformers import AutoTokenizer, BatchEncoding
 
 
 def return_tokenized_samples(nsamples, trainenc, seqlen, sequential=False):

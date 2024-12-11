@@ -12,26 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Utils for FX graph parsing and external kernel lowering
-
-"""
+"""Utils for FX graph parsing and external kernel lowering"""
 
 # Standard
-from typing import Any
 import logging
 import operator
 import os
+from typing import Any
 
 # Third Party
 import torch
 
-# Local
+# First Party
 from fms_mo.modules.linear import QLinear, QLinearDebug, QLinearW4A32Debug
 from fms_mo.utils.import_utils import available_packages
 from fms_mo.utils.utils import default_device_selection
 
 try:
-    # Local
+    # First Party
     from fms_mo.modules.linear import QLinearCutlassI8I32NT
 
     cutlass_available = True
@@ -39,7 +37,7 @@ except ImportError:
     cutlass_available = False
 
 try:
-    # Local
+    # First Party
     from fms_mo.modules.linear import QLinearExv1WI4AF16, QLinearExv2WI4AF16
 
     autogptq_available = True
@@ -161,7 +159,7 @@ def lower_qmodel_to_ext_kernels(
         and available_packages["exllama_kernels"]
         and available_packages["exllamav2_kernels"]
     ):
-        # Local
+        # First Party
         from fms_mo.modules.linear import QLinearExllamaV1, QLinearExllamaV2
 
         using_gptq = any(
@@ -254,7 +252,8 @@ def cus_backend_plotFXAtenGM(
 
     # Third Party
     from torch._decomp import get_decompositions
-    from torch._functorch.aot_autograd import aot_module_simplified, make_boxed_compiler
+    from torch._functorch.aot_autograd import (aot_module_simplified,
+                                               make_boxed_compiler)
 
     MAX_NODE_TO_PLOT = 1000
     plot_graph_module(
@@ -504,8 +503,8 @@ def plot_graph_module(
         return
 
     # Third Party
-    from tqdm import tqdm
     import pygraphviz as pgv
+    from tqdm import tqdm
 
     if skip_nodes is None:
         skip_nodes = []

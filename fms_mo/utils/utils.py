@@ -20,16 +20,17 @@
 """
 General utils for fms_mo
 """
+
 # Standard
+import logging
+import sys
 from contextlib import ExitStack, contextmanager
 from typing import Any, Callable, Dict, List, Tuple, Union
 from unittest import mock
-import logging
-import sys
 
 # Third Party
-from transformers.tokenization_utils_base import BatchEncoding
 import torch
+from transformers.tokenization_utils_base import BatchEncoding
 
 logger = logging.getLogger(__name__)
 
@@ -319,12 +320,12 @@ def default_device_selection():
 def checkpoint_summary(path_to_ckpt, print_to_file=False, show_details=False):
     """Open a checkpoint (safetensors format) and summarize data type vs total size."""
     # Standard
-    from pathlib import Path
     import json
+    from pathlib import Path
 
     # Third Party
-    from safetensors import safe_open
     import pandas as pd
+    from safetensors import safe_open
 
     ckpt_fp8_path = Path(path_to_ckpt)
     # 1. parse index -> which tensor in which file

@@ -21,21 +21,16 @@ import json
 import logging
 
 # Third Party
-from torch import nn
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch import nn
 
-# Local
+# First Party
 from fms_mo.custom_ext_kernels.utils import pack_vectorized
-from fms_mo.quant.quantizers import (
-    HardPrune,
-    Qbypass,
-    Qdynamic,
-    get_activation_quantizer,
-    get_weight_quantizer,
-    mask_fc_kij,
-)
+from fms_mo.quant.quantizers import (HardPrune, Qbypass, Qdynamic,
+                                     get_activation_quantizer,
+                                     get_weight_quantizer, mask_fc_kij)
 
 logger = logging.getLogger(__name__)
 
@@ -863,9 +858,7 @@ class QLinearINT8Deploy(nn.Linear):
                 w_scale = torch.Tensor([w_cv * 2 / (2**qlinear_iW.nbits_w - 2)])
             else:
                 # fms_mo formula is a bit different from conventional PT formula
-                quant_scale = (2**qlinear_iW.nbits_a - 1) / torch.Tensor(
-                    [a_cv - a_cvn]
-                )
+                quant_scale = (2**qlinear_iW.nbits_a - 1) / torch.Tensor([a_cv - a_cvn])
                 quant_stepsize = 1.0 / quant_scale
                 quant_zero_point = torch.round(a_cvn * quant_scale)
                 input_scale = quant_stepsize
@@ -1064,11 +1057,9 @@ class QLinearINT8Deploy(nn.Linear):
             self.iaddmm = self.iaddmm_int if self.useINTkernel else self.iaddmm_FP
         else:
             # When swapping the first QLinear, need to register our custom Op and choose the kernel
-            # Local
+            # First Party
             from fms_mo.custom_ext_kernels.utils import (
-                cutlass_ops_load_and_reg,
-                imatmul_ops_reg,
-            )
+                cutlass_ops_load_and_reg, imatmul_ops_reg)
 
             if self.useINTkernel:  # will use real imatmul
                 cutlass_ops_load_and_reg()
@@ -1399,13 +1390,12 @@ class QLinearCutlassI8I32NT(QLinearCublasI8I32NT):
 
 try:
     # Third Party
-    from auto_gptq.nn_modules.qlinear.qlinear_exllama import (
-        QuantLinear as QLinearExllamaV1,
-    )
-    from auto_gptq.nn_modules.qlinear.qlinear_exllamav2 import (
-        QuantLinear as QLinearExllamaV2,
-    )
-    from auto_gptq.nn_modules.qlinear.qlinear_exllamav2 import ext_gemm_half_q_half
+    from auto_gptq.nn_modules.qlinear.qlinear_exllama import \
+        QuantLinear as QLinearExllamaV1
+    from auto_gptq.nn_modules.qlinear.qlinear_exllamav2 import \
+        QuantLinear as QLinearExllamaV2
+    from auto_gptq.nn_modules.qlinear.qlinear_exllamav2 import \
+        ext_gemm_half_q_half
     from exllama_kernels import prepare_buffers, set_tuning_params
     from transformers.pytorch_utils import Conv1D
 

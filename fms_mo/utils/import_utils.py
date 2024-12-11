@@ -17,8 +17,8 @@ Utils for storing what optional dependencies are available
 """
 
 # Third Party
-from transformers.utils.import_utils import _is_package_available
 import torch
+from transformers.utils.import_utils import _is_package_available
 
 optional_packages = [
     "auto_gptq",

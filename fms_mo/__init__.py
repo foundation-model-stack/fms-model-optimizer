@@ -11,14 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""FMS Model Optimizer init. Import most commonly used functions and classes here.
-"""
+"""FMS Model Optimizer init. Import most commonly used functions and classes here."""
 
 # Standard
-from importlib.metadata import PackageNotFoundError, version
 import logging
+from importlib.metadata import PackageNotFoundError, version
 
-# Local
+# First Party
 from fms_mo.prep import qmodel_prep
 from fms_mo.utils.qconfig_utils import qconfig_init
 

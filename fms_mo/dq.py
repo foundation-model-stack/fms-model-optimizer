@@ -17,32 +17,25 @@
 """
 Script for direct quantization
 """
+
 # Standard
-from pathlib import Path
 import logging
 import os
+from pathlib import Path
 
 # Third Party
+import torch
 from datasets import load_from_disk
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import (
-    AutoConfig,
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    default_data_collator,
-)
-import torch
+from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
+                          default_data_collator)
 
-# Local
+# First Party
 from fms_mo import qconfig_init, qmodel_prep
 from fms_mo.fx.utils import model_size_Wb
-from fms_mo.quant.ptq import (
-    calibration_llm_1GPU,
-    dq_llm,
-    get_act_scales,
-    get_act_scales_1gpu,
-)
+from fms_mo.quant.ptq import (calibration_llm_1GPU, dq_llm, get_act_scales,
+                              get_act_scales_1gpu)
 from fms_mo.utils.dq_utils import config_quantize_smooth_layers
 from fms_mo.utils.eval_utils import Evaluator, eval_llm_1GPU
 from fms_mo.utils.utils import patch_torch_bmm, prepare_input

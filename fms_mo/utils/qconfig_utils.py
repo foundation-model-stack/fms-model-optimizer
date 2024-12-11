@@ -11,23 +11,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Util functions for qconfig.
-
-"""
+"""Util functions for qconfig."""
 
 # Standard
-from pathlib import Path
-from typing import Any
 import json
 import logging
 import os
 import warnings
+from pathlib import Path
+from typing import Any
 
 # Third Party
-from torch import nn
 import torch
+from torch import nn
 
-# Local
+# First Party
 from fms_mo.modules import QLSTM, QConv2d, QConvTranspose2d, QLinear
 
 # import numpy as np # only used in experimental func
@@ -197,9 +195,9 @@ def qconfig_init(recipe: str = None, args: Any = None):
     qcfg["bmm1_qm2_mode"] = "pact"
     qcfg["bmm2_qm2_mode"] = "pact"
     qcfg["qkvsync"] = False
-    qcfg[
-        "which2patch_contextmanager"
-    ] = None  # an internal var that should not be set by user
+    qcfg["which2patch_contextmanager"] = (
+        None  # an internal var that should not be set by user
+    )
 
     # LSTM related, if any of these is not None, then last layer (FC) will not be skipped.
     qcfg["nbits_w_lstm"] = None
@@ -261,7 +259,6 @@ def qconfig_init(recipe: str = None, args: Any = None):
     # 2. load values from json, if specified and exists
     #    this can be used to load a previously saved ckpt as well
     if recipe:
-
         cwd = Path().resolve()
         pkg_root = Path(__file__).parent.parent.resolve()
         file_in_cwd = cwd / recipe
@@ -463,7 +460,6 @@ def qconfig_save(qcfg, fname="qcfg.json"):
 def qconfig_load(fname="qcfg.json"):
     """Read config in json format, work together with qconfig_save"""
     if os.path.isfile(fname):
-
         with open(fname, "r", encoding="utf-8") as openfile:
             config = json.load(openfile)
 

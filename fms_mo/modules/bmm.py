@@ -15,10 +15,10 @@
 """Quantization Batch Matrix-Multiplication (BMM) modules"""
 
 # Third Party
-from torch import nn
 import torch
+from torch import nn
 
-# Local
+# First Party
 from fms_mo.quant.quantizers import Qbypass, Qdynamic, get_activation_quantizer
 
 
@@ -40,7 +40,6 @@ class QBmm(nn.Module):
         replaceBmm=True,
         **kwargs,
     ):
-
         """
         Initializes the quantized bmm module.
 
@@ -199,9 +198,9 @@ class QBmm(nn.Module):
 
             self.calib_counter -= 1
             if self.calib_counter == 0:
-                self.quantize_calib_m1 = (
-                    self.quantize_calib_m2
-                ) = self.calib_counter = None
+                self.quantize_calib_m1 = self.quantize_calib_m2 = self.calib_counter = (
+                    None
+                )
 
         else:
             qm1 = self.quantize_m1(m1)

@@ -15,16 +15,17 @@
 """
 Post-processing utilities for question answering.
 """
+
 # Standard
-from typing import Optional, Tuple
 import collections
 import json
 import logging
 import os
+from typing import Optional, Tuple
 
 # Third Party
-from tqdm.auto import tqdm
 import numpy as np
+from tqdm.auto import tqdm
 
 logger = logging.getLogger(__name__)
 

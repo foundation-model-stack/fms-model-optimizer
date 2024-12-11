@@ -17,18 +17,19 @@ Fixtures for testing models
 """
 
 # Standard
+import os
 from collections import OrderedDict
 from copy import deepcopy
-import os
 
 # Third Party
-from torchvision.io import read_image
-from torchvision.models import ResNet50_Weights, ViT_B_16_Weights, resnet50, vit_b_16
-from transformers import BertModel, BertTokenizer
 import pytest
 import torch
+from torchvision.io import read_image
+from torchvision.models import (ResNet50_Weights, ViT_B_16_Weights, resnet50,
+                                vit_b_16)
+from transformers import BertModel, BertTokenizer
 
-# Local
+# First Party
 # fms_mo imports
 from fms_mo import qconfig_init
 from fms_mo.modules import QLSTM, QConv2d, QConvTranspose2d, QLinear
@@ -881,6 +882,7 @@ def qw_mode(request):
 ########################
 # Save Config Fixtures #
 ########################
+
 
 # Dummy class
 class BadClass:

@@ -22,10 +22,10 @@ import logging
 import os
 
 # Third Party
-from torch.nn import Conv2d, Linear
 import torch
+from torch.nn import Conv2d, Linear
 
-# Local
+# First Party
 from fms_mo.modules.conv import DetQConv2d, QConv2d, QConv2dPTQ, QConv2dPTQv2
 from fms_mo.modules.linear import QLinear
 from fms_mo.utils.qconfig_utils import serialize_config

@@ -21,20 +21,20 @@ Some functions may require additional packages, e.g. auto_gptq, cutlass (source 
 # disable unused args because of torch op registration signature
 
 # Standard
-from functools import partial
-from pathlib import Path
 import logging
 import os
 import time
+from functools import partial
+from pathlib import Path
 
 # Third Party
-from packaging.version import Version
-from transformers.pytorch_utils import Conv1D
 import numpy as np
 import torch
 import torch.utils.cpp_extension as cpp_ext
+from packaging.version import Version
+from transformers.pytorch_utils import Conv1D
 
-# Local
+# First Party
 from fms_mo.utils.import_utils import available_packages
 from fms_mo.utils.utils import default_device_selection
 
@@ -514,7 +514,6 @@ def exllama_ops_load_and_reg(qcfg=None, run_unit_test=False):
         qcfg["AUTOGPTQ_AVAILABLE"] = True
         need_registration = False
     else:
-
         need_registration = (
             available_packages["exllama_kernels"]
             and available_packages["exllamav2_kernels"]
@@ -597,8 +596,7 @@ def exllama_ops_load_and_reg(qcfg=None, run_unit_test=False):
             q4: int,
             q4_width: int,
             force_cuda: bool,
-        ) -> torch.Tensor:
-            ...
+        ) -> torch.Tensor: ...
 
         # Generic implementation
         @kernel_impl(f"{namespace}::exv2_i4f16_fxinputs", "cuda")
@@ -815,7 +813,7 @@ def lower_qmodel_cutlass(
     # Third Party
     from torch.ao.quantization.utils import _parent_name
 
-    # Local
+    # First Party
     from fms_mo.modules.linear import QLinear, QLinearINT8Deploy
 
     currDev = getattr(mod, "device", next(mod.parameters()).device)

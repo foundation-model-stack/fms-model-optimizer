@@ -25,20 +25,20 @@ AdaRoundSTE, AdaRoundQuantizerare are modified from BRECQ's repo: https://github
 # pylint: disable=too-many-return-statements
 
 # Standard
-from collections.abc import Mapping
-from typing import Any, Union
 import logging
 import math
 import os
 import random
+from collections.abc import Mapping
+from typing import Any, Union
 
 # Third Party
-from packaging.version import Version
 import numpy as np
 import torch
 import torch.fx
 import torch.nn as nn  # pylint: disable=consider-using-from-import
 import torch.nn.functional as F
+from packaging.version import Version
 
 logger = logging.getLogger(__name__)
 
@@ -1489,8 +1489,9 @@ class PACT2_STE(torch.autograd.Function):
         align_zero,
         use_PT_native_Qfunc,
     ):
-        clip_val, clip_valn = clip_val.to(input_tensor.dtype), clip_valn.to(
-            input_tensor.dtype
+        clip_val, clip_valn = (
+            clip_val.to(input_tensor.dtype),
+            clip_valn.to(input_tensor.dtype),
         )
         ctx.save_for_backward(input_tensor, clip_val, clip_valn)
         if inplace:
@@ -1948,8 +1949,9 @@ class PACTplus2STE(torch.autograd.Function):
         intg_zp,
         use_PT_native_Qfunc,
     ):
-        clip_val, clip_valn = clip_val.to(input_tensor.dtype), clip_valn.to(
-            input_tensor.dtype
+        clip_val, clip_valn = (
+            clip_val.to(input_tensor.dtype),
+            clip_valn.to(input_tensor.dtype),
         )
         n_levels = 2**num_bits - 1
         scale = n_levels / (clip_val - clip_valn)
@@ -3059,8 +3061,9 @@ class Qmax(nn.Module):
                     input_tensor.abs().reshape(self.perGp), dim=1
                 ).values
                 clipvaln_new = -clipval_new
-            assert len(clipval_new) == (
-                input_tensor.shape[0] * input_tensor.shape[1] // self.perGp[1]
+            assert (
+                len(clipval_new)
+                == (input_tensor.shape[0] * input_tensor.shape[1] // self.perGp[1])
             ), f"dimension error, input_tensor{input_tensor.shape}, clipval{clipval_new.shape}"
         elif self.extend_act_range:
             if input_tensor.max() >= input_tensor.min().abs():
@@ -3416,9 +3419,7 @@ class QmaxSimple(nn.Module):
         """
         super().__init__()
         self.num_bits = num_bits
-        self.nlevels = (
-            2**num_bits - 2 if not minmax and align_zero else 2**num_bits - 1
-        )
+        self.nlevels = 2**num_bits - 2 if not minmax and align_zero else 2**num_bits - 1
         self.align_zero = align_zero
         self.minmax = minmax  # False -> use  abs.max and symmetric
         self.movAvgFac = 0.1
@@ -3513,9 +3514,7 @@ class Qdynamic(nn.Module):
         super().__init__()
         self.num_bits = num_bits
         self.symmetric = symmetric or qmode.endswith("_sym")
-        self.nlevels = (
-            2**self.num_bits - 2 if self.symmetric else 2**self.num_bits - 1
-        )
+        self.nlevels = 2**self.num_bits - 2 if self.symmetric else 2**self.num_bits - 1
         self.align_zero = align_zero
         self.qmode = qmode
         self.quantizer = QminmaxSTEnoclip
@@ -4527,9 +4526,7 @@ class MSEObserver(ObserverBase):
     def forward(self, x_orig):
         if x_orig.numel() == 0:
             return x_orig
-        x = (
-            x_orig.clone().detach().to(self.min_val.dtype)
-        )  # pylint: disable=access-member-before-definition
+        x = x_orig.clone().detach().to(self.min_val.dtype)  # pylint: disable=access-member-before-definition
         if self.one_side_dist is None:
             self.one_side_dist = (
                 "pos" if x.min() >= 0.0 else "neg" if x.max() <= 0.0 else "no"
@@ -4871,9 +4868,7 @@ class PACT2_sw(nn.Module):
             )
 
         # break clip symmetry to avoid additional Q level due to rounding
-        if (
-            self.clip_val.item() == -self.clip_valn.item()
-        ):  # pylint: disable=invalid-unary-operand-type
+        if self.clip_val.item() == -self.clip_valn.item():  # pylint: disable=invalid-unary-operand-type
             self.clip_valn.data += 0.00001
 
         self.dequantize = dequantize
@@ -4896,8 +4891,7 @@ class PACT2_sw(nn.Module):
         # recalculate scale and zero point (passing them from quantizer creates memory leak)
         with torch.no_grad():
             self.scale.fill_(
-                (2**self.num_bits - 1)
-                / (self.clip_val.item() - self.clip_valn.item())
+                (2**self.num_bits - 1) / (self.clip_val.item() - self.clip_valn.item())
             )
             self.zero_point.fill_(
                 (self.scale * self.clip_valn).round().item()
@@ -5548,6 +5542,7 @@ class to_custom_fp8(nn.Module):
 
 
 # =====================================================================================
+
 
 ###for pruning
 def mask_conv2d_kij(weight, group=4, prune_ratio=0.5):

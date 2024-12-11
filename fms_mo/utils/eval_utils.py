@@ -20,11 +20,11 @@ Evaluation utils for DQ
 import logging
 
 # Third Party
+import torch
 from torch import nn
 from tqdm import tqdm
-import torch
 
-# Local
+# First Party
 from fms_mo.quant.ptq import cache_block0_inputs, get_blocks
 from fms_mo.utils.utils import patch_torch_bmm
 
@@ -32,9 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 @torch.no_grad()
-def eval_llm_1GPU(
-    qcfg, model, test_dataset, pre_cache_func=None, **kwargs
-):  # pylint: disable=unused-argument
+def eval_llm_1GPU(qcfg, model, test_dataset, pre_cache_func=None, **kwargs):  # pylint: disable=unused-argument
     """
     Evaluate causal LLM with 1GPU, return perplexity
     Note: currently taking test_dataset as dict (instead of dataloader)

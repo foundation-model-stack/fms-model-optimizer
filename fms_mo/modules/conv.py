@@ -19,20 +19,14 @@
 import logging
 
 # Third Party
-from torch import nn
 import torch
 import torch.nn.functional as F
+from torch import nn
 
-# Local
-from fms_mo.quant.quantizers import (
-    PACT,
-    HardPrune,
-    Qbypass,
-    Qdynamic,
-    get_activation_quantizer,
-    get_weight_quantizer,
-    mask_conv2d_kij,
-)
+# First Party
+from fms_mo.quant.quantizers import (PACT, HardPrune, Qbypass, Qdynamic,
+                                     get_activation_quantizer,
+                                     get_weight_quantizer, mask_conv2d_kij)
 
 logger = logging.getLogger(__name__)
 
@@ -279,9 +273,9 @@ class QConv2d(nn.Conv2d):
 
             self.calib_counter -= 1
             if self.calib_counter == 0:
-                self.quantize_calib_feature = (
-                    self.quantize_calib_weight
-                ) = self.calib_counter = None
+                self.quantize_calib_feature = self.quantize_calib_weight = (
+                    self.calib_counter
+                ) = None
             # This should prevent calib_counter to be saved in ckpt, which will override future
             # fp32init if exists.
 
@@ -581,9 +575,9 @@ class QConv2dPTQ(nn.Conv2d):
                 self.calib_counter == 0 and self.ptq_calibration_counter == 0
             ):  # Keep the calibQ for PTQ if needed (will use force_calib_once in PTQ)
                 # [optional] this should release some unused memory
-                self.quantize_calib_feature = (
-                    self.quantize_calib_weight
-                ) = self.calib_counter = None
+                self.quantize_calib_feature = self.quantize_calib_weight = (
+                    self.calib_counter
+                ) = None
 
         elif (
             self.ptq_calibration_counter
@@ -901,9 +895,9 @@ class QConv2dPTQv2(nn.Conv2d):
             if self.calib_counter == 0 and self.ptq_calibration_counter == 0:
                 # Keep the calibQ for PTQ if needed (will use force_calib_once in PTQ)
                 # [optional] this should release some unused memory
-                self.quantize_calib_feature = (
-                    self.quantize_calib_weight
-                ) = self.calib_counter = None
+                self.quantize_calib_feature = self.quantize_calib_weight = (
+                    self.calib_counter
+                ) = None
 
         elif self.ptqmode == "fp32_out":
             # ie, 1st time this module is run, clone the FP32 weights, assuming weight is
@@ -1377,7 +1371,6 @@ class QConv2d_cutlass_i8i32_nt(nn.Conv2d):
             qconv2d_cutlass.quantize_weight = fms_mo_qconv2d.quantize_weight
 
             if not hasattr(qconv2d_cutlass.quantize_feature, "clip_valn"):
-
                 if isinstance(qconv2d_cutlass.quantize_feature, PACT):
                     logger.warning(
                         f"Using PACT {qconv2d_cutlass.quantize_feature} object, "

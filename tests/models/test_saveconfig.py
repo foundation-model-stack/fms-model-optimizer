@@ -19,9 +19,10 @@ Test qconfig_save functionality
 # Third Party
 import pytest
 
-# Local
+# First Party
 from fms_mo.utils.qconfig_utils import qconfig_load, qconfig_save
-from tests.models.test_model_utils import delete_config, load_json, save_serialized_json
+from tests.models.test_model_utils import (delete_config, load_json,
+                                           save_serialized_json)
 
 #########
 # Tests #

@@ -21,7 +21,7 @@ Test check_config functionality
 import pytest
 import torch
 
-# Local
+# First Party
 from fms_mo.utils.qconfig_utils import check_config
 
 

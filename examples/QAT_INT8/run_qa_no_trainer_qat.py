@@ -19,15 +19,20 @@ Fine-tuning a 🤗 Transformers model for question answering using 🤗 Accelera
 # You can also adapt this script on your own question answering task. Pointers for this are left as comments.
 
 # Standard
-from pathlib import Path
 import argparse
 import json
 import logging
 import math
 import os
 import random
+from pathlib import Path
 
 # Third Party
+import datasets
+import evaluate
+import numpy as np
+import torch
+import transformers
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
@@ -35,26 +40,13 @@ from datasets import load_dataset
 from huggingface_hub import HfApi
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
-from transformers import (
-    CONFIG_MAPPING,
-    MODEL_MAPPING,
-    AutoConfig,
-    AutoModelForQuestionAnswering,
-    AutoTokenizer,
-    DataCollatorWithPadding,
-    EvalPrediction,
-    SchedulerType,
-    default_data_collator,
-    get_scheduler,
-)
+from transformers import (CONFIG_MAPPING, MODEL_MAPPING, AutoConfig,
+                          AutoModelForQuestionAnswering, AutoTokenizer,
+                          DataCollatorWithPadding, EvalPrediction,
+                          SchedulerType, default_data_collator, get_scheduler)
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 from utils_qa import postprocess_qa_predictions
-import datasets
-import evaluate
-import numpy as np
-import torch
-import transformers
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.39.0.dev0")
@@ -1068,11 +1060,10 @@ def main():
         return eval_metric
 
     # ---- [fms_mo] the following code are added for qat/ptq ----
-    # Local
+    # First Party
     from fms_mo import qconfig_init, qmodel_prep
 
     if args.do_qat:
-
         # create a config dict, if same item exists in both recipe and args, args has the priority.
         qcfg = qconfig_init(recipe="qat_int8", args=args)
 
@@ -1089,14 +1080,14 @@ def main():
     # ---- [fms_mo] the following code are performing speed tests ----
     elif args.do_lowering:
         # Standard
-        from copy import deepcopy
         import time
+        from copy import deepcopy
 
         # Third Party
-        from torch.ao.quantization.utils import _parent_name
         import pandas as pd
+        from torch.ao.quantization.utils import _parent_name
 
-        # Local
+        # First Party
         from fms_mo.modules.linear import QLinear, QLinearINT8Deploy
 
         def speedtest(model, exam_inp, Ntest=100):
@@ -1132,7 +1123,6 @@ def main():
             ("int8", "ind"),
             ("int8", "cugr"),
         ]:
-
             logger.info(
                 f"\n    {label} {'with' if comp_mode else 'without'} torch.compile"
             )
@@ -1140,9 +1130,9 @@ def main():
 
             if label == "int8":
                 qcfg = qconfig_init(recipe="qat_int8", args=args)
-                qcfg[
-                    "qmodel_calibration"
-                ] = 0  # no need to run calibration or trained scales will be lost.
+                qcfg["qmodel_calibration"] = (
+                    0  # no need to run calibration or trained scales will be lost.
+                )
                 qmodel_prep(
                     model_copy,
                     exam_inp,
@@ -1395,9 +1385,9 @@ def main():
             "step": completed_steps,
         }
     if args.do_predict:
-        log[
-            "squad_v2_predict" if args.version_2_with_negative else "squad_predict"
-        ] = predict_metric
+        log["squad_v2_predict" if args.version_2_with_negative else "squad_predict"] = (
+            predict_metric
+        )
 
         accelerator.log(log, step=completed_steps)
 

@@ -40,9 +40,9 @@ jobs:
       fail-fast: false
       matrix:
         lint:
-          - name: "fmt"
+          - name: "ruff"
             commands: |
-              tox -e fmt
+              tox -e ruff
           - name: "pylint"
             commands: |
               echo "::add-matcher::.github/workflows/matchers/pylint.json"

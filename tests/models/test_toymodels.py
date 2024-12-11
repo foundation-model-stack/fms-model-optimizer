@@ -22,16 +22,12 @@ from copy import deepcopy
 # Third Party
 import torch
 
-# Local
+# First Party
 from fms_mo import qmodel_prep
 from fms_mo.modules.conv import DetQConv2d, QConv2d, QConv2dPTQ, QConv2dPTQv2
 from fms_mo.modules.linear import QLinear
-from tests.models.test_model_utils import (
-    delete_config,
-    is_qconv2d,
-    is_qlinear,
-    is_quantized_layer,
-)
+from tests.models.test_model_utils import (delete_config, is_qconv2d,
+                                           is_qlinear, is_quantized_layer)
 
 
 def test_subclass():
