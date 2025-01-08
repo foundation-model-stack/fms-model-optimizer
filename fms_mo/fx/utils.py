@@ -317,7 +317,7 @@ def lname_to_org_name(Lname):
     return org_mod_name
 
 
-def get_org_mod_name_of_fx_node(node, gm=None):
+def get_org_mod_name_of_fx_node(node, gm=None, LUTfx2org={}):
     """Given a FX node, could be call_module or call_fuction, find out the original module name,
     based on meta data
 
@@ -325,22 +325,39 @@ def get_org_mod_name_of_fx_node(node, gm=None):
     1. if graph breaks, it won't provide the full name corresponding to top level
     2. gm.meta.get("dynamo_flat_name_to_original_fqn") seems to be designed for parameters/buffers
         not modules, possibly still need to use our lname_to_org_name()
+    3. by matching parameter tensors from original model and dynamo graphmodule, we could create a
+        LUT for fx module name to original name (only Linear and Conv, or mod with parameters). BUT
+        we also need self-attention module for torch.matmul ops => add a partial matching to infer,
+        e.g. if we have 'L__self___model_layers_slice_None__32__None___0_self_attn_q_proj' in LUT
+            'L__self___model_layers_slice_None__32__None___0_self_attn' can be infered easily
 
     Args:
         node (fx.node): fx node of interest
         gm (GraphModule, optional): FX graph containing the given fx node. could be useful when
                                     parsing the node name
+        LUTfx2org (dict, optional): LUT from fx module name to original module name
 
     Returns:
         str: corresponding name on original graph
     """
     org_name = f"Unknown:{node.name}"
     if "nn_module_stack" in node.meta:
+        n_fx_mod_name = list(node.meta["nn_module_stack"].keys())[-1]
         n_fx_org_mod_name = list(node.meta["nn_module_stack"].values())[-1][0]
-        org_name = None
-        if gm and isinstance(node.target, str):
+        if n_fx_mod_name in LUTfx2org:
+            org_name = LUTfx2org[n_fx_mod_name]
+        elif gm and isinstance(node.target, str):
             LUT = gm.meta.get("dynamo_flat_name_to_original_fqn", {})  # see Note 2
             org_name = LUT.get(node.target, None)
+        else:
+            for k, v in LUTfx2org.items():
+                if k.startswith(n_fx_mod_name):
+                    suffix = k[len(n_fx_mod_name) :]
+                    suffix = "." + suffix[1:]  # replace leading "_" with "."
+                    if v.endswith(suffix):
+                        org_name = v[: -len(suffix)]
+                    break
+
         if org_name is None:
             org_name = lname_to_org_name(n_fx_org_mod_name)
 
@@ -472,6 +489,7 @@ def plot_graph_module(
     skip_nodes=None,
     Nnode_to_plot=None,
     additional_coloring_rules=None,
+    LUTfx_mod_name_to_org={},
 ):
     """Plots a GraphModule in .SVG format to visualize the compute graph. If graphviz/pygraphviz is
     not installed properly, this function will just print out a message and do nothing.
@@ -543,7 +561,9 @@ def plot_graph_module(
         ]:
             n_tar += f": {str(node_ptr.target).replace('<','').replace('>','')}"
         elif ntype in ["call_module", "get_attr"]:
-            org_mod_name = get_org_mod_name_of_fx_node(node_ptr)
+            org_mod_name = get_org_mod_name_of_fx_node(
+                node_ptr, LUTfx2org=LUTfx_mod_name_to_org
+            )
             n_tar += f": {org_mod_name}"
             if node_ptr.target.startswith(fx_mod_name + "_"):
                 attr_name = node_ptr.target[len(fx_mod_name) + 1 :]

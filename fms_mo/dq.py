@@ -65,6 +65,9 @@ def run_dq(model_args, data_args, fms_mo_args, output_dir):
             tokenized dataset
         fms_mo_args (fms_mo.training_args.FMSMOArguments): Parameters to use for DQ quantization
         output_dir (str) Output directory to write to
+    NOTE:
+        use dynamo tracing instead of torchscript by default. if torchscript is needed, change
+        1) config_kwarks and 2) use_dynamo in qmodel_prep()
     """
     # for attention or kv-cache quantization, need to use eager attention
     attn_bits = [
@@ -72,7 +75,7 @@ def run_dq(model_args, data_args, fms_mo_args, output_dir):
         fms_mo_args.nbits_bmm2,
         fms_mo_args.nbits_kvcache,
     ]
-    if any(attn_bits) != 32:
+    if any(x != 32 for x in attn_bits):
         attn_implementation = "eager"
     else:
         attn_implementation = None
@@ -80,7 +83,7 @@ def run_dq(model_args, data_args, fms_mo_args, output_dir):
         "cache_dir": model_args.cache_dir,
         "revision": model_args.model_revision,
         "use_auth_token": True if model_args.use_auth_token else None,
-        "torchscript": True,
+        "torchscript": False,
         "attn_implementation": attn_implementation,
     }
     config = AutoConfig.from_pretrained(model_args.model_name_or_path, **config_kwargs)
@@ -123,6 +126,7 @@ def run_dq(model_args, data_args, fms_mo_args, output_dir):
     if torch.cuda.is_available():
         total_gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
     model_size = model_size_Wb(model, unit="GB")
+    gpu_mem_util_per = model_size / total_gpu_memory
 
     known_large_models = [
         "Llama-2-70b",
@@ -134,7 +138,7 @@ def run_dq(model_args, data_args, fms_mo_args, output_dir):
     ]
     qcfg["large_model"] = any(
         name in model_args.model_name_or_path for name in known_large_models
-    ) or (model_size > 0.7 * total_gpu_memory)
+    ) or (gpu_mem_util_per > 0.7)
     dev = "cpu" if qcfg["large_model"] else "cuda:0"
 
     if hasattr(model.config, "model_type"):
@@ -184,6 +188,9 @@ def run_dq(model_args, data_args, fms_mo_args, output_dir):
         if qcfg["large_model"]:
             act_scales = get_act_scales_1gpu(model, dq_dataloader, qcfg)
         else:
+            if gpu_mem_util_per < 0.7:
+                model.to(dev)
+
             act_scales = get_act_scales(model, dq_dataloader, qcfg)
         scale_file = f"{act_scale_directory}/{qcfg['model'].replace('/', '-')}" + ".pt"
         torch.save(act_scales, scale_file)
