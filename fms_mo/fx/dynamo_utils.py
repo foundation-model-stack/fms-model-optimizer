@@ -46,7 +46,7 @@ def dfs_gm(
     prescreenOp=None,
     hook=None,
     return_nodes=False,
-    LUTfx_mod_name_to_org={},
+    lut_fx_mod_name_to_org={},
 ):
     """Depth-First Search at FX IR level, to replace our old TorchScript equivalent func
     Because FX IR is a higher level IR, should have much fewer
@@ -217,7 +217,7 @@ def dfs_gm(
         for n_ln, d in node_found.items():
             n, line_num = n_ln  # unpack tuple
             org_mod_names[
-                get_org_mod_name_of_fx_node(n, gm, LUTfx_mod_name_to_org), line_num
+                get_org_mod_name_of_fx_node(n, gm, lut_fx_mod_name_to_org), line_num
             ] = d  # see Note 2
 
         return dict(
@@ -227,7 +227,7 @@ def dfs_gm(
     return node_found
 
 
-def find_conv_on_shortcut_gm(gm: torch.fx.GraphModule, LUTfx_mod_name_to_org={}):
+def find_conv_on_shortcut_gm(gm: torch.fx.GraphModule, lut_fx_mod_name_to_org={}):
     """Identify Conv on shortcut using FX GM DFS
     It's (almost) specific for ResNet-like CNNs, will return a list of module names (as used in the
     original model, not FX module names)
@@ -335,18 +335,18 @@ def find_conv_on_shortcut_gm(gm: torch.fx.GraphModule, LUTfx_mod_name_to_org={})
                     conv_mod = gm.get_submodule(n_conv_i.target)
                 else:
                     conv_mod = get_org_mod_name_of_fx_node(
-                        n_conv_i, LUTfx2org=LUTfx_mod_name_to_org
+                        n_conv_i, lut_fx2org=lut_fx_mod_name_to_org
                     )
                 if conv_mod.out_channels > conv_mod.in_channels:  # see Note 2
                     qconv_candidate.append(
-                        get_org_mod_name_of_fx_node(n_conv_i, gm, LUTfx_mod_name_to_org)
+                        get_org_mod_name_of_fx_node(n_conv_i, gm, lut_fx_mod_name_to_org)
                     )
 
     return qconv_candidate
 
 
 def find_1st_last_gm(
-    gm, firstOps=None, lastOps=None, return_1st_last_sep=False, LUTfx_mod_name_to_org={}
+    gm, firstOps=None, lastOps=None, return_1st_last_sep=False, lut_fx_mod_name_to_org={}
 ):
     """Identify the first and last layer of interests
     Usually only interested in Conv and Linear, but could be others as well
@@ -366,14 +366,14 @@ def find_1st_last_gm(
         gm,
         targetOp=firstOps,
         find1stOnly=True,
-        LUTfx_mod_name_to_org=LUTfx_mod_name_to_org,
+        lut_fx_mod_name_to_org=lut_fx_mod_name_to_org,
     )
     last_candidates = dfs_gm(
         gm,
         targetOp=lastOps,
         find1stOnly=True,
         reverse=True,
-        LUTfx_mod_name_to_org=LUTfx_mod_name_to_org,
+        lut_fx_mod_name_to_org=lut_fx_mod_name_to_org,
     )
 
     min_depth = min(list(first_candidates.values()) + [999])
@@ -397,7 +397,7 @@ def find_1st_last_gm(
 
 
 def find_single_sided_op_gm(
-    gm, op_of_interest=None, return_LUTs=False, verbose=False, LUTfx_mod_name_to_org={}
+    gm, op_of_interest=None, return_LUTs=False, verbose=False, lut_fx_mod_name_to_org={}
 ):
     """Try to determine the "polarity" of output of "every nodes" based on their inputs and the Op
     itself, then decide which Conv/Linear (or user-specified Op) will use single-sided quantizer
@@ -546,7 +546,7 @@ def find_single_sided_op_gm(
         gm,
         targetOp=op_of_interest,
         return_nodes=True,
-        LUTfx_mod_name_to_org=LUTfx_mod_name_to_org,
+        lut_fx_mod_name_to_org=lut_fx_mod_name_to_org,
     )
 
     SingleSidedOps = []
@@ -557,7 +557,7 @@ def find_single_sided_op_gm(
             risky_nodes.append(n)
         if all(input_pos):
             SingleSidedOps.append(
-                get_org_mod_name_of_fx_node(n, gm, LUTfx_mod_name_to_org)
+                get_org_mod_name_of_fx_node(n, gm, lut_fx_mod_name_to_org)
             )
 
     if risky_nodes:
@@ -570,7 +570,7 @@ def find_single_sided_op_gm(
     return SingleSidedOps
 
 
-def find_qkvsync_candidates_gm(gm, return_nodes=False, LUTfx_mod_name_to_org={}):
+def find_qkvsync_candidates_gm(gm, return_nodes=False, lut_fx_mod_name_to_org={}):
     """Identify groups of Linears that share the same parent. It's a transformer-specific feature.
 
     NOTE:
@@ -609,7 +609,7 @@ def find_qkvsync_candidates_gm(gm, return_nodes=False, LUTfx_mod_name_to_org={})
     for depth, nodes in LUTdep2nodes.items():
         parents = [ni.all_input_nodes[0] for ni in nodes]
         org_mod_names = [
-            get_org_mod_name_of_fx_node(ni, gm, LUTfx_mod_name_to_org) for ni in nodes
+            get_org_mod_name_of_fx_node(ni, gm, lut_fx_mod_name_to_org) for ni in nodes
         ]
         if all(p == parents[0] for p in parents[1:]):
             Nshared_parents += 1
@@ -620,7 +620,7 @@ def find_qkvsync_candidates_gm(gm, return_nodes=False, LUTfx_mod_name_to_org={})
     return my_1st_sibling
 
 
-def find_silu_gm(gm, LUTfx_mod_name_to_org={}):
+def find_silu_gm(gm, lut_fx_mod_name_to_org={}):
     """Special handle for Conv following silu, specific for EffDet and etc
     LLM could use SiLU as well (llama?), but not relavent to this func
     """
@@ -633,14 +633,14 @@ def find_silu_gm(gm, LUTfx_mod_name_to_org={}):
         gpOp = get_target_op_from_node(gp_nodes[0], gm) if gp_nodes else None
 
         if torch.nn.functional.silu in [pOp, gpOp]:
-            siluConv[get_org_mod_name_of_fx_node(n, gm, LUTfx_mod_name_to_org)] = {
+            siluConv[get_org_mod_name_of_fx_node(n, gm, lut_fx_mod_name_to_org)] = {
                 "qa_mode": "qsilu"
             }
 
     return siluConv
 
 
-def find_rpn_fpn_gm(gm, verbose=False, Nsubgraph=0, LUTfx_mod_name_to_org={}):
+def find_rpn_fpn_gm(gm, verbose=False, Nsubgraph=0, lut_fx_mod_name_to_org={}):
     """For object detection CNN models, RPN (RegionProposalNetwork) and FPN (FeaturePyramidNetwork)
     are commonly used. prefer to skip them, but may be ok to quantize in some cases.
 
@@ -703,7 +703,7 @@ def find_rpn_fpn_gm(gm, verbose=False, Nsubgraph=0, LUTfx_mod_name_to_org={}):
                 targetOp=[torch.nn.Conv2d],
                 start_nodes=fpn_st_nodes,
                 stop_nodes=[fpn_end_node],
-                LUTfx_mod_name_to_org=LUTfx_mod_name_to_org,
+                lut_fx_mod_name_to_org=lut_fx_mod_name_to_org,
             )
             fpn_convs = [mod_name for mod_name, ln in fpn_convs.keys()]  # see Note 4
             fpn_adds = dfs_gm(
@@ -730,7 +730,7 @@ def find_rpn_fpn_gm(gm, verbose=False, Nsubgraph=0, LUTfx_mod_name_to_org={}):
                     ):
                         fpn_inner_blocks.append(
                             get_org_mod_name_of_fx_node(
-                                gp, LUTfx2org=LUTfx_mod_name_to_org
+                                gp, lut_fx2org=lut_fx_mod_name_to_org
                             )
                         )
             fpn_convs += fpn_inner_blocks
@@ -744,7 +744,7 @@ def find_rpn_fpn_gm(gm, verbose=False, Nsubgraph=0, LUTfx_mod_name_to_org={}):
     return fpn_convs
 
 
-def find_and_prep_bmm_gm(gm, LUTfx_mod_name_to_org={}):
+def find_and_prep_bmm_gm(gm, lut_fx_mod_name_to_org={}):
     """Previously with TorchScript, we use this func to perform 2 tasks:
         a) create QBmms, and then attach them to the model,
         b) set up qcfg["which2patch_contextmanager"] so that patch_torch_bmm() context
@@ -798,7 +798,7 @@ def find_and_prep_bmm_gm(gm, LUTfx_mod_name_to_org={}):
     LUTmodname2linenum = {}  # see Note 4
     for node_line_num, depth in LUT2sort.items():
         node, line_num = node_line_num
-        org_mod_name = get_org_mod_name_of_fx_node(node, gm, LUTfx_mod_name_to_org)
+        org_mod_name = get_org_mod_name_of_fx_node(node, gm, lut_fx_mod_name_to_org)
         if org_mod_name in LUTmodname2linenum:
             LUTmodname2linenum[org_mod_name] += [(node, line_num, depth)]
         else:
@@ -880,9 +880,9 @@ def model_analyzer(
     2. Use Dynamo to replace TorchScript tracing in old qmodel_prep(),
 
     NOTE:
-    1. Will use LUTweight2modname to find the prefix for subgraphs, should graph break. As module
-        seems to have extra layer of wrapper from Dynamo, matching module, i.e. id(module), may lead
-        to incorrect results, matching weights (tensor) should be consistent.
+    1. Will use lut_weight_to_mod_name to find the prefix for subgraphs, should graph break. As
+        module seems to have extra layer of wrapper from Dynamo, matching module, i.e. id(module),
+        may lead to incorrect results, matching weights (tensor) should be consistent.
     2. For subgraph, we might be getting a partial "original name", such as layer.0.xxx instead of
         "encoder".layer.0.xxx => we can use param pointers to identify the real original name and
         "subtract" the partial name out and get the prefix
@@ -894,7 +894,7 @@ def model_analyzer(
     """
 
     qcfg["N_backend_called"] = 0
-    LUTweight2modname = {
+    lut_weight_to_mod_name = {
         mod.weight: n
         for n, mod in model.named_modules()
         if isinstance(mod, (torch.nn.Linear, torch.nn.Conv2d))
@@ -941,10 +941,10 @@ def model_analyzer(
 
         """
         qcfg["N_backend_called"] += 1
-        LUTfx_mod_name_to_org = {
-            n.replace(".weight", ""): LUTweight2modname[p]
+        lut_fx_mod_name_to_org = {
+            n.replace(".weight", ""): lut_weight_to_mod_name[p]
             for n, p in gm_fx.named_parameters()
-            if p in LUTweight2modname
+            if p in lut_weight_to_mod_name
         }
         prefix = None
         if qcfg["N_backend_called"] > 1:  # subgraph found, see Note 2
@@ -952,9 +952,9 @@ def model_analyzer(
                 if n.op == "call_module":
                     mod = gm_fx.get_submodule(n.target)
                     if isinstance(mod, (torch.nn.Linear, torch.nn.Conv2d)):
-                        real_org_modname = LUTweight2modname[mod.weight]
+                        real_org_modname = lut_weight_to_mod_name[mod.weight]
                         part_org_modname = get_org_mod_name_of_fx_node(
-                            n, gm_fx, LUTfx_mod_name_to_org
+                            n, gm_fx, lut_fx_mod_name_to_org
                         )
                         idx = real_org_modname.rindex(part_org_modname)
                         if idx > 1:
@@ -972,7 +972,7 @@ def model_analyzer(
                 outputname=plotsvg,
                 show_details=True,
                 Nnode_to_plot=1000,
-                LUTfx_mod_name_to_org=LUTfx_mod_name_to_org,
+                lut_fx_mod_name_to_org=lut_fx_mod_name_to_org,
             )
 
         # Graph checks begin. Use append, add prefix if needed
@@ -984,7 +984,7 @@ def model_analyzer(
             if isinstance(m, torch.nn.Conv2d) or issubclass(type(m), torch.nn.Conv2d)
         ]
         if len(all_conv) > 0:
-            skip_candidates += find_conv_on_shortcut_gm(gm_fx, LUTfx_mod_name_to_org)
+            skip_candidates += find_conv_on_shortcut_gm(gm_fx, lut_fx_mod_name_to_org)
 
         # Check 2. first/last, see Note 2 and 3
         if qcfg["N_backend_called"] > 1:
@@ -993,19 +993,19 @@ def model_analyzer(
             _, last_only = find_1st_last_gm(
                 gm_fx,
                 return_1st_last_sep=True,
-                LUTfx_mod_name_to_org=LUTfx_mod_name_to_org,
+                lut_fx_mod_name_to_org=lut_fx_mod_name_to_org,
             )
             skip_candidates += last_only
         else:
             # see Note 4
             skip_candidates += find_1st_last_gm(
-                gm_fx, LUTfx_mod_name_to_org=LUTfx_mod_name_to_org
+                gm_fx, lut_fx_mod_name_to_org=lut_fx_mod_name_to_org
             )
         qcfg["qskip_layer_name"] += add_prefix_to_list_or_dict(skip_candidates, prefix)
 
         # Check 3: single/double sided
         qcfg["qsinglesided_name"] += add_prefix_to_list_or_dict(
-            find_single_sided_op_gm(gm_fx, LUTfx_mod_name_to_org=LUTfx_mod_name_to_org),
+            find_single_sided_op_gm(gm_fx, lut_fx_mod_name_to_org=lut_fx_mod_name_to_org),
             prefix,
         )
 
@@ -1016,12 +1016,12 @@ def model_analyzer(
         # Check 5: Conv+SiLU
         qcfg["qspecial_layers"].update(
             add_prefix_to_list_or_dict(
-                find_silu_gm(gm_fx, LUTfx_mod_name_to_org), prefix
+                find_silu_gm(gm_fx, lut_fx_mod_name_to_org), prefix
             )
         )
 
         # Check 6: BMM
-        temp_dict = find_and_prep_bmm_gm(gm_fx, LUTfx_mod_name_to_org)  # see Note 5
+        temp_dict = find_and_prep_bmm_gm(gm_fx, lut_fx_mod_name_to_org)  # see Note 5
         if len(temp_dict["layers_with_bmm"]) > 0:
             temp_dict["layers_with_bmm"] = add_prefix_to_list_or_dict(
                 temp_dict["layers_with_bmm"], prefix
@@ -1033,7 +1033,7 @@ def model_analyzer(
 
         # Check 7: QKV
         temp_dict = find_qkvsync_candidates_gm(
-            gm_fx, LUTfx_mod_name_to_org=LUTfx_mod_name_to_org
+            gm_fx, lut_fx_mod_name_to_org=lut_fx_mod_name_to_org
         )  # see Note 6
         temp_dict = add_prefix_to_list_or_dict(
             temp_dict, prefix, update_both_k_and_v=True

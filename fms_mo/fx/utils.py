@@ -317,7 +317,7 @@ def lname_to_org_name(Lname):
     return org_mod_name
 
 
-def get_org_mod_name_of_fx_node(node, gm=None, LUTfx2org={}):
+def get_org_mod_name_of_fx_node(node, gm=None, lut_fx2org={}):
     """Given a FX node, could be call_module or call_fuction, find out the original module name,
     based on meta data
 
@@ -335,7 +335,7 @@ def get_org_mod_name_of_fx_node(node, gm=None, LUTfx2org={}):
         node (fx.node): fx node of interest
         gm (GraphModule, optional): FX graph containing the given fx node. could be useful when
                                     parsing the node name
-        LUTfx2org (dict, optional): LUT from fx module name to original module name
+        lut_fx2org (dict, optional): LUT from fx module name to original module name
 
     Returns:
         str: corresponding name on original graph
@@ -344,13 +344,13 @@ def get_org_mod_name_of_fx_node(node, gm=None, LUTfx2org={}):
     if "nn_module_stack" in node.meta:
         n_fx_mod_name = list(node.meta["nn_module_stack"].keys())[-1]
         n_fx_org_mod_name = list(node.meta["nn_module_stack"].values())[-1][0]
-        if n_fx_mod_name in LUTfx2org:
-            org_name = LUTfx2org[n_fx_mod_name]
+        if n_fx_mod_name in lut_fx2org:
+            org_name = lut_fx2org[n_fx_mod_name]
         elif gm and isinstance(node.target, str):
             LUT = gm.meta.get("dynamo_flat_name_to_original_fqn", {})  # see Note 2
             org_name = LUT.get(node.target, None)
         else:
-            for k, v in LUTfx2org.items():
+            for k, v in lut_fx2org.items():
                 if k.startswith(n_fx_mod_name):
                     suffix = k[len(n_fx_mod_name) :]
                     suffix = "." + suffix[1:]  # replace leading "_" with "."
@@ -489,7 +489,7 @@ def plot_graph_module(
     skip_nodes=None,
     Nnode_to_plot=None,
     additional_coloring_rules=None,
-    LUTfx_mod_name_to_org={},
+    lut_fx_mod_name_to_org={},
 ):
     """Plots a GraphModule in .SVG format to visualize the compute graph. If graphviz/pygraphviz is
     not installed properly, this function will just print out a message and do nothing.
@@ -562,7 +562,7 @@ def plot_graph_module(
             n_tar += f": {str(node_ptr.target).replace('<','').replace('>','')}"
         elif ntype in ["call_module", "get_attr"]:
             org_mod_name = get_org_mod_name_of_fx_node(
-                node_ptr, LUTfx2org=LUTfx_mod_name_to_org
+                node_ptr, lut_fx2org=lut_fx_mod_name_to_org
             )
             n_tar += f": {org_mod_name}"
             if node_ptr.target.startswith(fx_mod_name + "_"):
