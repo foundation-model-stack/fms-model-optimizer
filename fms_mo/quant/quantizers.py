@@ -4035,8 +4035,8 @@ class AdaRoundQuantizer(nn.Module):
         self.reset_ReSig_param(multimodal)
 
         self.beta = 2 / 3
-        self.Wshape = None
-        self.reshape2 = None
+        self.Wshape: list[Any] = list()
+        self.reshape2: list[Any] = list()
 
     def forward(self, x):
         if self.useSAWB:
