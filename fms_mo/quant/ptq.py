@@ -2643,7 +2643,7 @@ try:
     bn_affine = True  # FrozenBN doesn't have .affine property
 except:
     BNofInteret = (nn.BatchNorm2d, nn.BatchNorm1d)
-    AbsorbLayers = (nn.Conv2d, nn.Linear)
+    AbsorbLayers = (nn.Conv2d, nn.Linear)  # type: ignore[assignment]
 
 
 def search_fold_and_remove_bn(model, mod_folded):

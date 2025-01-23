@@ -55,7 +55,8 @@ def parse_operation(op_str: str):
     operands = op_str[
         last_open_parenthesis_index + 1 : last_close_parenthesis_index
     ].split(",")
-    operands = [operand.strip() for operand in operands] if operands != [""] else None
+    # pylint: disable=line-too-long
+    operands = [operand.strip() for operand in operands] if operands != [""] else None  # type: ignore[assignment]
     return operator, operands
 
 
