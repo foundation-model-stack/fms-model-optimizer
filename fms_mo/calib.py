@@ -482,7 +482,8 @@ def qmodel_calib(
         return model
 
     DPorDDPdevices = None
-    if "qmodel_prep" not in sys._getframe().f_back.f_code.co_name:
+    f_back = sys._getframe().f_back
+    if f_back and "qmodel_prep" not in f_back.f_code.co_name:
         model.to(currDev)
         qcfg["wasDPmodel"] = qcfg.get("wasDPmodel", isinstance(model, nn.DataParallel))
         qcfg["wasDDPmodel"] = qcfg.get(
