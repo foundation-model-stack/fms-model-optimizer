@@ -3895,7 +3895,8 @@ class UniformAffineQuantizer(nn.Module):
                 self.delta = torch.nn.Parameter(delta)
             else:
                 delta, zero_point = self.init_quantization_scale(x, self.channel_wise)
-                self.delta.fill_(delta)
+                if self_data := self.delta:
+                    self_data.fill_(delta)
                 self.zero_point.fill_(zero_point)
             self.inited = True
 
@@ -3960,7 +3961,7 @@ class UniformAffineQuantizer(nn.Module):
                     if score < best_score:
                         best_score = score
                         delta = (new_max - new_min) / (2**self.n_bits - 1)
-                        zero_point = (-new_min / delta).round()
+                        zero_point = (-new_min / delta).round()  # type: ignore[union-attr]
             else:
                 raise NotImplementedError
 
@@ -5389,7 +5390,7 @@ if Version(torch.__version__) >= Version("2.1"):
             if "e4m3" in q_mode:
                 self.float8_dtype = torch.float8_e4m3fn
             elif "e5m2" in q_mode:
-                self.float8_dtype = torch.float8_e5m2G
+                self.float8_dtype = torch.float8_e5m2
             else:
                 raise ValueError("FP8 only supports e4m3 and e5m2")
             self.emulate = emulate
