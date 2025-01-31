@@ -22,6 +22,13 @@ import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 
+# pylint: disable=unused-argument
+# i8i8 op must be registered with specific I/O, even if not in use by the op function
+
+# pylint: disable=not-callable
+# torch.nn.functional.linear not recognized as callable
+# open issue in PyLint: https://github.com/pytorch/pytorch/issues/119482
+
 
 def register_aiu_i8i8_op():
     """Register AIU-specific op to enable torch compile without graph break.
@@ -64,7 +71,8 @@ def register_aiu_i8i8_op():
         dtype = x.dtype
         out_feat, in_feat = weight.size()
 
-        w_cv, w_cvn, a_cv, a_cvn, zshift, sq = extract_qdata(
+        # unused returns are w_cvn and zero_shift
+        w_cv, _, a_cv, a_cvn, _, sq = extract_qdata(
             qdata,
             weight_quant_type,
             activ_quant_type,
@@ -88,6 +96,8 @@ def register_aiu_i8i8_op():
         activ_quant_type,
         smoothquant,
     ):
+        """OP template of I/O sizes"""
+
         outshape = x.size()[:-1] + (weight.size(0),)
         return torch.empty(
             outshape, dtype=x.dtype, device=x.device, requires_grad=False
@@ -153,18 +163,19 @@ def dequant_weights(
     w_cv: torch.Tensor,
     sq: torch.Tensor,
     weight_quant_type: str,
-):
+) -> torch.Tensor:
+    """Dequantize integer weights based on quantizer type"""
+
     if weight_quant_type == "per_tensor":  # assume 8-bit symmetric W quantization
         # w size: (out_feat, in_feat)
         # sq size: (in_feat) or (1), no need to unsqueeze
         return (weight * w_cv / 127) / sq
-    elif weight_quant_type == "per_channel":
+    if weight_quant_type == "per_channel":
         # w_cv is (out_feat), need to unsqueeze to broadcast mul to weight
         return (weight * w_cv.unsqueeze(dim=1) / 127) / sq
-    else:
-        raise NotImplementedError(
-            f"weight quantizantion type {weight_quant_type} is not supported"
-        )
+    raise NotImplementedError(
+        f"weight quantizantion type {weight_quant_type} is not supported"
+    )
 
 
 def quant_dequant_activ(
@@ -173,8 +184,10 @@ def quant_dequant_activ(
     a_cvn: torch.Tensor,
     sq: torch.Tensor,
     activ_quant_type: str,
-):
+) -> torch.Tensor:
     """
+    Quantize and dequantize activations based on quantizer type
+
     x size    (*, hid_dim)
     sq size   (hid_dim) or (1)
     => no need to unsqueeze to perform x / sq
@@ -183,18 +196,17 @@ def quant_dequant_activ(
         scale_x = 127 / a_cv
         x_int = torch.round(x / sq * scale_x).clamp(-127, 127)
         return x_int / scale_x * sq
-    elif activ_quant_type == "per_tensor_asymm":
+    if activ_quant_type == "per_tensor_asymm":
         scale_x = 255 / (a_cv - a_cvn)
         zp_x = a_cvn * scale_x
         x_int = torch.round(x / sq * scale_x - zp_x).clamp(0, 255)
         return (x_int + zp_x) / scale_x * sq
-    elif activ_quant_type == "per_token":
+    if activ_quant_type == "per_token":
         x_sq = x / sq
         a_cv_per_token = x_sq.abs().max(dim=-1, keepdim=True)[0]
         scale_x = 127 / a_cv_per_token
         x_int = torch.round(x_sq * scale_x).clamp(-127, 127)
         return x_int / scale_x * sq
-    else:
-        raise NotImplementedError(
-            f"activation quantizantion type {activ_quant_type} is not supported"
-        )
+    raise NotImplementedError(
+        f"activation quantizantion type {activ_quant_type} is not supported"
+    )

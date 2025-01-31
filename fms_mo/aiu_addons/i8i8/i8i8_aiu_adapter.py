@@ -23,6 +23,7 @@ import torch
 
 def _int8_qparams_aiu(
     input_sd: Mapping[str, torch.Tensor],
+    **kwargs,  # pylint: disable=unused-argument
 ) -> Mapping[str, torch.Tensor]:
     new_sd = {}
     modules_seen = set()
@@ -94,7 +95,6 @@ def _add_defaults_and_concat(
                 sq_scale.to(torch.float32),
             )
         )
-    return
 
 
 # registration of new adapter steps for each architecture

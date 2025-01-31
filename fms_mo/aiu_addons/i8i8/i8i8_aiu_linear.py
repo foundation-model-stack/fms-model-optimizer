@@ -28,7 +28,6 @@ from fms.modules.linear import (
 from fms.modules.tp import ShardType, TPModule
 from fms.utils.config import ModelConfig
 import torch
-import torch.nn as nn
 
 # Local
 from fms_mo.aiu_addons.i8i8.i8i8_aiu_op import register_aiu_i8i8_op
@@ -38,6 +37,8 @@ register_aiu_i8i8_op()
 
 @dataclass
 class W8A8LinearConfig(ModelConfig):
+    """Configuration for W8A8 Linear module"""
+
     linear_type: str = "int8"
     bits: int = 8
     weight_per_channel: bool = False
@@ -46,8 +47,10 @@ class W8A8LinearConfig(ModelConfig):
     smoothquant_layers: Optional[list] = None
 
 
-class W8A8LinearAIU(nn.Module):
-    """Simplified QLinear that wraps quantize/dequantize operation"""
+class W8A8LinearAIU(torch.nn.Module):
+    """Simplified QLinear that wraps quantize/dequantize operation.
+    fms_mo.i8i8_aiu must have been pre-registered to use this class.
+    """
 
     def __init__(
         self,
@@ -199,7 +202,9 @@ def get_int8_aiu_linear(
     bias: bool,
     linear_config: Optional[Mapping[str, Any]] = None,
     use_smoothquant: bool = True,
-):
+) -> torch.nn.Module:
+    """Retrieve a W8A8 Linear module"""
+
     int8_config = W8A8LinearConfig(**linear_config)
     linear = W8A8LinearAIU(
         in_features=in_features,
@@ -216,8 +221,7 @@ def shard_int8_aiu_linear(
     tp_module: TPModule,
     module_sharding_info: dict[str, LinearModuleShardingInfo],
 ) -> Optional[set]:
-    """
-    Set up INT8 (W8A8) quantization parameters to be sharded onto
+    """Set up INT8 (W8A8) quantization parameters to be sharded onto
     AIU-compliant linear modules
 
                          |     GPU     |
@@ -273,8 +277,7 @@ def shard_int8_aiu_linear(
     )
 
     raise NotImplementedError("TP not yet supported for INT8. Work in progress")
-
-    return unused_keys
+    # return unused_keys
 
 
 register_linear_type_to_module_map("int8_aiu", get_int8_aiu_linear)
