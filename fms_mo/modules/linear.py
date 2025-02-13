@@ -752,7 +752,7 @@ class QLinearINT8Deploy(nn.Linear):
         qlin_int.max_acc_bits = kwargs.get("max_acc_bits", 32)
         qlin_int.accminmax = (
             -(1 << (qlin_int.max_acc_bits - 1)),
-            1 << (qlin_int.max_acc_bits - 1) - 1,
+            (1 << (qlin_int.max_acc_bits - 1)) - 1,
         )
         qlin_int.truncate_lsb = kwargs.get("truncate_lsb", 0)
         qlin_int.chunk_size = kwargs.get("chunk_size", 100000)
@@ -871,7 +871,7 @@ class QLinearINT8Deploy(nn.Linear):
 
         qlinear_iW.nbits_a = 8  # Only support INT8 for now
         qlinear_iW.nbits_w = 8
-        qlinear_iW.acc_dtype = torch.float16
+        qlinear_iW.acc_dtype = kwargs.get("acc_dtype", torch.float)
         qlinear_iW.usePTnativeQfunc = kwargs.get("use_PT_native_Qfunc", True)
         qlinear_iW.use_int_kernel = kwargs.get("use_int_kernel", "triton")
         qlinear_iW.weight = nn.Parameter(
