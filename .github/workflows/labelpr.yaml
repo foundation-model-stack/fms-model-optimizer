@@ -17,7 +17,7 @@ jobs:
             const valid_pr_types = ['feat', 'fix', 'docs', 'style', 'refactor', 'perf', 'test', 'build', 'ci', 'chore', 'revert'];
 
             if(context.payload.pull_request.comments === 0) {
-              await github.issues.createComment({ ...context.repo, issue_number: context.payload.number, body: pr_welcome_msg});
+              await github.rest.issues.createComment({ ...context.repo, issue_number: context.payload.number, body: pr_welcome_msg});
             }
 
             const title = context.payload.pull_request.title;
@@ -32,4 +32,4 @@ jobs:
             const labels = context.payload.pull_request.labels;
             const new_labels = labels.filter(label => !valid_pr_types.includes(label.name)); // keep all labels that are not in valid_pr_types
             new_labels.push({name: pr_type});
-            await github.issues.update({ ...context.repo, issue_number: context.payload.number, labels: new_labels });
+            await github.rest.issues.update({ ...context.repo, issue_number: context.payload.number, labels: new_labels });
