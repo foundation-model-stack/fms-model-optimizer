@@ -15,7 +15,7 @@
 
 # Standard
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict
 import json
 import logging
 import os
@@ -149,7 +149,7 @@ def qconfig_init(recipe: str = None, args: Any = None):
                 otherwise use constantLR as default
     """
 
-    qcfg = {}
+    qcfg: Dict[str, Any] = {}
     # 1. create a dict with default values
     qcfg["mapping"] = {
         nn.Conv2d: {"from": nn.Conv2d, "to": QConv2d, "otherwise": QConv2d},
