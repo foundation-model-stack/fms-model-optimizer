@@ -74,11 +74,31 @@ i8i8_metadata = [
         "atype": "per_tensor_symm",  # per_tensor_asymm, per_token
         "smoothquant": False,
     },
-    # {
-    #     "wtype": "per_channel",  # per_channel
-    #     "atype": "per_tensor_symm",  # per_tensor_asymm, per_token
-    #     "smoothquant": False,
-    # },
+    {
+        "wtype": "per_tensor",  # per_channel
+        "atype": "per_tensor_asymm",  # per_tensor_asymm, per_token
+        "smoothquant": False,
+    },
+    {
+        "wtype": "per_channel",  # per_channel
+        "atype": "per_tensor_symm",  # per_tensor_asymm, per_token
+        "smoothquant": False,
+    },
+    {
+        "wtype": "per_tensor",  # per_channel
+        "atype": "per_token",  # per_tensor_asymm, per_token
+        "smoothquant": False,
+    },
+    {
+        "wtype": "per_channel",  # per_channel
+        "atype": "per_tensor_asymm",  # per_tensor_asymm, per_token
+        "smoothquant": False,
+    },
+    {
+        "wtype": "per_channel",  # per_channel
+        "atype": "per_token",  # per_tensor_asymm, per_token
+        "smoothquant": False,
+    },
 ]
 
 
