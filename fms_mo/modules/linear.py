@@ -27,9 +27,6 @@ import torch
 import torch.nn.functional as F
 
 # Local
-from fms_mo.custom_ext_kernels.triton_kernels import (
-    tl_matmul_chunk_truncate as tl_matmul,
-)
 from fms_mo.custom_ext_kernels.utils import pack_vectorized
 from fms_mo.quant.quantizers import (
     HardPrune,
@@ -39,6 +36,13 @@ from fms_mo.quant.quantizers import (
     get_weight_quantizer,
     mask_fc_kij,
 )
+from fms_mo.utils.import_utils import available_packages
+
+if available_packages["triton"]:
+    # Local
+    from fms_mo.custom_ext_kernels.triton_kernels import (
+        tl_matmul_chunk_truncate as tl_matmul,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -879,7 +883,9 @@ class QLinearINT8Deploy(nn.Linear):
         qlinear_iW.nbits_w = 8
         qlinear_iW.acc_dtype = kwargs.get("acc_dtype", torch.float)
         qlinear_iW.usePTnativeQfunc = kwargs.get("use_PT_native_Qfunc", True)
-        qlinear_iW.use_int_kernel = kwargs.get("use_int_kernel", "triton")
+        qlinear_iW.use_int_kernel = kwargs.get(
+            "use_int_kernel", "triton" if available_packages["triton"] else False
+        )
         qlinear_iW.weight = nn.Parameter(
             nnlin_iW.weight.to(torch.int8), requires_grad=False
         )
@@ -1119,7 +1125,7 @@ class QLinearINT8Deploy(nn.Linear):
                 imatmul_ops_reg,
             )
 
-            if self.use_int_kernel == "triton":
+            if self.use_int_kernel == "triton" and available_packages["triton"]:
                 # will use real imatmul written in triton
                 imm_func = partial(
                     tl_matmul,
@@ -1127,7 +1133,7 @@ class QLinearINT8Deploy(nn.Linear):
                     chunk_size=self.chunk_size,
                 )
 
-            elif self.use_int_kernel == "cutlass":
+            elif self.use_int_kernel == "cutlass" and available_packages["cutlass"]:
                 # will use real imatmul written in cutlass
                 cutlass_ops_load_and_reg()
                 # Third Party

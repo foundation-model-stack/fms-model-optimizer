@@ -37,7 +37,8 @@ dependencies = [
 "huggingface_hub",
 "pandas",
 "safetensors",
-"ibm-fms>=0.0.8"
+"ibm-fms>=0.0.8",
+"pkginfo>1.10"
 ]
 
 [project.optional-dependencies]

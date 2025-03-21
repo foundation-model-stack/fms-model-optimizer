@@ -92,6 +92,7 @@ def quantize(
                 "auto_gptq module not found. For more instructions on installing the appropriate "
                 "package, see https://github.com/AutoGPTQ/AutoGPTQ?tab=readme-ov-file#installation"
             )
+        gptq_args.use_triton = gptq_args.use_triton and available_packages["triton"]
         run_gptq(model_args, data_args, opt_args, gptq_args)
     elif opt_args.quant_method == "fp8":
         if not available_packages["llmcompressor"]:
