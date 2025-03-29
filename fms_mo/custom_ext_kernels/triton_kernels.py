@@ -101,6 +101,7 @@ def matmul_kernel(
     stride_cm,
     stride_cn,
     chunk_trun_bits,
+    truncate_then_accumulate,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
@@ -159,15 +160,20 @@ def matmul_kernel(
         a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
         b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
         # We accumulate along the K dimension.
-        accumulator = tl.dot(a, b, accumulator, input_precision="ieee")
+        if truncate_then_accumulate:
+            accumulator_inner = tl.dot(a, b, input_precision="ieee")
+        else:
+            accumulator_inner = tl.dot(a, b, accumulator, input_precision="ieee")
         # tl.dot() default is using TF32 approximation, not good enough for LSB truncation exp
 
         ## ------ add chunky LSB rounding/masking --------
         if chunk_trun_bits > 0:
-            accumulator = libdevice.uint_as_float(
-                (libdevice.float_as_uint(accumulator) + round_bit) & trun_mask
-            )
+            accumulator_inner = round_and_trun(accumulator_inner, round_bit, trun_mask)
         ## ---------------------------------------------------------
+        if truncate_then_accumulate:
+            accumulator += accumulator_inner
+        else:
+            accumulator = accumulator_inner
 
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * stride_ak
@@ -206,6 +212,7 @@ def imatmul_kernel(
     stride_cm,
     stride_cn,
     chunk_trun_bits,
+    truncate_then_accumulate,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
@@ -244,13 +251,20 @@ def imatmul_kernel(
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
         b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
-        accumulator = tl.dot(a, b, accumulator, input_precision="ieee")
+        if truncate_then_accumulate:
+            accumulator_inner = tl.dot(a, b, input_precision="ieee")
+        else:
+            accumulator_inner = tl.dot(a, b, accumulator, input_precision="ieee")
 
         ## ------ add chunky LSB rounding/masking --------
         if chunk_trun_bits != 0:
-            accumulator = (accumulator + round_bit) >> chunk_trun_bits
-            accumulator = accumulator << chunk_trun_bits
+            accumulator_inner = (accumulator_inner + round_bit) >> chunk_trun_bits
+            accumulator_inner = accumulator_inner << chunk_trun_bits
         ## ---------------------------------------------------------
+        if truncate_then_accumulate:
+            accumulator += accumulator_inner
+        else:
+            accumulator = accumulator_inner
 
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
@@ -267,28 +281,161 @@ def imatmul_kernel(
 
 
 @triton.jit
+def matmul_kernel_DABC(
+    # Pointers to matrices
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    # Matrix dimensions
+    M,
+    N,
+    K,
+    # The stride variables represent how much to increase the ptr by when moving by 1
+    # element in a particular dimension. E.g. `stride_am` is how much to increase `a_ptr`
+    # by to get the element one row down (A has M rows).
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    chunk_trun_bits,
+    truncate_then_accumulate,
+    # Meta-parameters
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    ACTIVATION: tl.constexpr,
+):
+    """Kernel for computing the matmul D = A x B + C that include LSB truncation.
+    A has shape (M, K), B has shape (K, N) and C/D has shape (M, N).
+    NOTE:
+        C should be consistent with accumulator dtype, e.g. fp8xfp8 -> fp32.
+        *D ptr is supposed to be the same as C ptr, no need to provide D as arg
+        **we can be used C to verify unintended truncation by CUDA as well.
+    Args:
+        chunk_trun_bits (int): number of LSB to truncate/round. [0 to 23]
+    """
+    # -----------------------------------------------------------
+    # Map program ids `pid` to the block of C it should compute.
+    # This is done in a grouped ordering to promote L2 data reuse.
+    # See above `L2 Cache Optimizations` section for details.
+    pid = tl.program_id(axis=0)
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    num_pid_in_group = GROUP_SIZE_M * num_pid_n
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_SIZE_M
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+    pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
+    pid_n = (pid % num_pid_in_group) // group_size_m
+
+    # ----------------------------------------------------------
+    # Create pointers for the first blocks of A and B.
+    # We will advance this pointer as we move in the K direction
+    # and accumulate
+    # `a_ptrs` is a block of [BLOCK_SIZE_M, BLOCK_SIZE_K] pointers
+    # `b_ptrs` is a block of [BLOCK_SIZE_K, BLOCK_SIZE_N] pointers
+    # See above `Pointer Arithmetic` section for details
+    offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
+    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    offs_k = tl.arange(0, BLOCK_SIZE_K)
+    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
+    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
+
+    # -----------------------------------------------------------
+    # Iterate to compute a block of the C matrix.
+    # We accumulate into a `[BLOCK_SIZE_M, BLOCK_SIZE_N]` block
+    # of fp32 values for higher accuracy, i.e. C should have been cast to fp32 already
+    accumulator = tl.load(c_ptrs, mask=c_mask, other=0.0)
+    ## ------ prepare LSB rounding/truncation masks -------
+    # NOTE mask will be applied on accumulator, which is alway FP32, so we may truncate up to 23b
+    # e.g., 20b -> trun_mask = 0xFFF00000, round_bit = 0x00080000
+    #        8b -> trun_mask = 0xFFFFFF00, round_bit = 0x00000080
+    trun_mask = tl.cast((0xFFFFFFFF >> chunk_trun_bits) << chunk_trun_bits, tl.uint32)
+    round_bit = 1 << (chunk_trun_bits - 1) if chunk_trun_bits > 0 else 0
+    ## ---------------------------------------------------------
+
+    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+        # Load the next block of A, B, and C, generate a mask by checking the K dimension.
+        # If it is out of bounds, set it to 0.
+        # D = truncation(A*B) + C
+        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
+        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+        # We accumulate along the K dimension. but apply truncation on local A*B first
+        if truncate_then_accumulate:
+            accumulator_inner = tl.dot(a, b, input_precision="ieee")
+        else:
+            accumulator_inner = tl.dot(a, b, accumulator, input_precision="ieee")
+        # tl.dot() default is using TF32 approximation, not good enough for LSB truncation exp
+        # NOTE: tl.dot(a, b, c) should correspond to a CUDA mma instruction, typically "c = a*b+c".
+        #       If this mma instruction uses "reduced-precision" under the hood, not only a*b will
+        #       be accumulated in that precision, there's a chance c will be cast to that "lower"
+        #       precision as well, hence, could lose some precision!
+
+        ## ------ add chunky LSB rounding/masking --------
+        if chunk_trun_bits > 0:
+            accumulator_inner = round_and_trun(accumulator_inner, round_bit, trun_mask)
+        ## ---------------------------------------------------------
+        if truncate_then_accumulate:
+            accumulator += accumulator_inner
+        else:
+            accumulator = accumulator_inner
+
+        # Advance the ptrs to the next K block.
+        a_ptrs += BLOCK_SIZE_K * stride_ak
+        b_ptrs += BLOCK_SIZE_K * stride_bk
+    # You can fuse arbitrary activation functions here
+    # while the accumulator is still in FP32!
+    if ACTIVATION == "leaky_relu":
+        accumulator = leaky_relu(accumulator)
+
+    d = accumulator  # do not cast to (tl.float16) just yet
+
+    # -----------------------------------------------------------
+    # Write back the block of the output to matrix "C" with masks.
+    tl.store(c_ptrs, d, mask=c_mask)
+
+
+@triton.jit
 def leaky_relu(x):
     """Activation function that could be fused into matmul kernel"""
     return tl.where(x >= 0, x, 0.01 * x)
 
 
+@triton.jit
+def round_and_trun(x, round_bit, trun_mask):
+    """Round and truncate (usually for accumulator)."""
+    return libdevice.uint_as_float((libdevice.float_as_uint(x) + round_bit) & trun_mask)
+
+
 def tl_matmul_chunk_truncate(
     a,
     b,
+    c=None,
     activation="",
     chunk_trun_bits=0,
     chunk_size=16,
+    truncate_then_accumulate=True,
     cast_output_to_input_dtype=None,
 ):
     """Triton matmul for HW behavior simulation. Supports float and int8.
-    a. variable chunk size (i.e., BLOCK_SIZE_K)
-    b. LSB truncation, must <23 if using float.
+    i. variable chunk size (i.e., BLOCK_SIZE_K)
+    ii. LSB truncation, must <23 if using float.
+    iii. assume D = A*B + C, where C is optional. If C exists, it will be updated inplace.
 
     Args:
         a, b: input tensors. FloatX, X in [32, 16, 8] or INT8.
         activation (str, optional): activation func to be fused, see relu example.
         chunk_trun_bits (int, optional): number of LSBs to be truncated/rounded.
         chunk_size (int, optional): BLOCK_SIZE_K, some HW has specific chunk size. must >= 16.
+        truncate_then_accumulate (bool, optional): if True, c = truncate(a*b) + c, otherwise
+                                                    c = truncate(a*b+c)
         cast_output_to_input_dtype (bool, optional): accumulator has higher prec than input, usually
                                                     FP32 or INT32. by default we cast the final
                                                     output to the same dtype as input for non-8bits.
@@ -300,6 +447,7 @@ def tl_matmul_chunk_truncate(
     use empirical way to determine BLOCK sizes, may not be optimal. But need to avoid autotune for
     real model inference. otherwise auto-tune will be triggered in every forward call.
     """
+
     # Check constraints.
     assert a.shape[1] == b.shape[0], "Incompatible dimensions"
     assert a.is_contiguous(), "Matrix A must be contiguous"
@@ -314,8 +462,6 @@ def tl_matmul_chunk_truncate(
     if cuda_cc[0] >= 9 or cuda_cc == (8, 9):
         allowed_dtypes += DTYPE_F8
     assert a.dtype in allowed_dtypes, "Input dtype is not supported"
-    M, K = a.shape
-    K, N = b.shape
 
     # Allocates output, always accumulate in FP32 (if floats) or INT32 then cast
     def isPowerofTwo(x):
@@ -323,19 +469,53 @@ def tl_matmul_chunk_truncate(
         return (x & (x - 1)) == 0
 
     min_chunk_size = 32 if a.dtype in DTYPE_8BIT else 16
-    if isPowerofTwo(chunk_size):
-        chunk_size = max(chunk_size, min_chunk_size)
-    else:
-        chunk_size = min_chunk_size
 
+    # because min k (chunk size in this case) for fp16/bf16 is 16, if smaller is needed, we could
+    # insert 0s in between elements, e.g. pad [m,k] -> [m,2k], [k,n]->[2k,n], out=[m,n] unchanged.
+    # Do not support INT8 for now.
+    if chunk_size == 8 and a.dtype in [
+        torch.float8_e4m3fn,
+        torch.float16,
+        torch.bfloat16,
+    ]:
+        exp_ratio = min_chunk_size // chunk_size
+        a_padded = torch.zeros(
+            a.shape[0], a.shape[1] * exp_ratio, dtype=a.dtype, device=a.device
+        )
+        a_padded[:, ::exp_ratio] = a
+        a = a_padded
+        b_padded = torch.zeros(
+            b.shape[0] * exp_ratio, b.shape[1], dtype=b.dtype, device=b.device
+        )
+        b_padded[::exp_ratio, :] = b
+        b = b_padded
+        chunk_size = min_chunk_size
+    else:
+        chunk_size = (
+            max(chunk_size, min_chunk_size)
+            if isPowerofTwo(chunk_size)
+            else min_chunk_size
+        )
+
+    M, K = a.shape
+    K, N = b.shape
     if a.dtype in DTYPE_I8:
         acc_dtype = torch.int32
         mm_kernel = imatmul_kernel
     else:
         acc_dtype = torch.float32
-        mm_kernel = matmul_kernel
+        mm_kernel = matmul_kernel if c is None else matmul_kernel_DABC
         assert chunk_trun_bits < 23, "FP32 accumulator only has 23 mantissa bits"
-    c = torch.zeros((M, N), device=a.device, dtype=acc_dtype)
+
+    if c is None:
+        c_org_dtype = a.dtype
+        c = torch.zeros((M, N), device=a.device, dtype=acc_dtype)
+    else:
+        # if C is in fp16, accumulate in fp32 no matter what, decide whether to cast back later
+        c_org_dtype = c.dtype
+        c = c.to(acc_dtype)
+        assert c.shape[0] == M and c.shape[1] == N, "C shape is inconsistent with A B."
+        assert acc_dtype == torch.float32, "INT truncation is not yet supported."
 
     # 1D launch kernel where each block gets its own program.
     def grid(META):
@@ -345,7 +525,7 @@ def tl_matmul_chunk_truncate(
 
     if M < 1024 or N < 1024:
         kernel_config = {
-            "BLOCK_SIZE_M": 128,
+            "BLOCK_SIZE_M": 64,
             "BLOCK_SIZE_K": chunk_size,
             "BLOCK_SIZE_N": 32,
             "GROUP_SIZE_M": 8,
@@ -376,7 +556,8 @@ def tl_matmul_chunk_truncate(
         c.stride(0),
         c.stride(1),
         chunk_trun_bits=chunk_trun_bits,
+        truncate_then_accumulate=truncate_then_accumulate,
         ACTIVATION=activation,
         **kernel_config,  # if using auto-tune, comment this line out.
     )
-    return c.to(a.dtype) if cast_output_to_input_dtype else c
+    return c.to(c_org_dtype) if cast_output_to_input_dtype else c

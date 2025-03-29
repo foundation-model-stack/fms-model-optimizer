@@ -1803,7 +1803,7 @@ class LinearFuncFPxFwdBwd(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, x, weight, bias=None, trun_bits=0, chunk_size=16):
+    def forward(ctx, x, weight, bias=None, trun_bits=0, chunk_size=16, fp8_dyn=False):
         assert x.dtype in [torch.float, torch.bfloat16, torch.float16]
         # input can be 2D or 3D, need to reshape before tl_matmul
         org_dtype = x.dtype
@@ -1819,6 +1819,20 @@ class LinearFuncFPxFwdBwd(torch.autograd.Function):
         ctx.save_for_backward(x, weight)  # x, W are saved in their original dtype
         ctx.trun_bits = trun_bits
         ctx.chunk_size = chunk_size
+        ctx.fp8_dyn = fp8_dyn
+
+        if fp8_dyn:
+            # use Q/dQ simulation for now, meaning still compute in fp16/bf16
+            # if choose per_token for input, use per_channel for W
+            # (W saved as [out, in], reduce inCh-dim, => reduce_dim=1)
+            ctx.fp8_e4m3_max = torch.finfo(torch.float8_e4m3fn).max
+            ctx.fp8_e5m2_max = torch.finfo(torch.float8_e5m2).max
+            reduce_dim = None if fp8_dyn == "per_tensor" else 1
+            x_scale = x.abs().amax(dim=reduce_dim) / ctx.fp8_e4m3_max
+            w_scale = weight.abs().amax(dim=reduce_dim) / ctx.fp8_e4m3_max
+
+            x = (x / x_scale).to(torch.float8_e4m3fn).to(org_dtype) * x_scale
+            weight = (weight / w_scale).to(torch.float8_e4m3fn).to(org_dtype) * w_scale
 
         # triton kernel assumes 2D inputs and cast the return to input.dtype
         output = tl_matmul(
@@ -1846,6 +1860,19 @@ class LinearFuncFPxFwdBwd(torch.autograd.Function):
         target_shape_grad_input = grad_output.shape[:-1] + (in_dim,)
         grad_output_2D = grad_output.reshape(-1, out_dim).to(dtype_input)
 
+        if ctx.fp8_dyn:
+            reduce_dim = None if ctx.fp8_dyn == "per_tensor" else 1
+            x_scale = x.abs().amax(dim=reduce_dim) / ctx.fp8_e5m2_max
+            w_scale = weight.abs().amax(dim=reduce_dim) / ctx.fp8_e5m2_max
+            # always assume perT in this case
+            grad_out_scale = grad_output_2D.abs().amax(dim=None) / ctx.fp8_e5m2_max
+
+            x = (x / x_scale).to(torch.float8_e5m2).to(dtype_input) * x_scale
+            weight = (weight / w_scale).to(torch.float8_e5m2).to(weight.dtype) * w_scale
+            grad_output_2D = (grad_output_2D / grad_out_scale).to(torch.float8_e5m2).to(
+                grad_output.dtype
+            ) * grad_out_scale
+
         # Compute grad_weight, shape = [out, in]
         # NOTE: this triton kernel requires A matrix to be contiguous
         grad_weight = tl_matmul(
@@ -1871,7 +1898,7 @@ class LinearFuncFPxFwdBwd(torch.autograd.Function):
         else:
             grad_bias = grad_output_2D.sum(0).to(ctx.bias_dtype)
 
-        return grad_input, grad_weight, grad_bias, None
+        return grad_input, grad_weight, grad_bias, None, None, None
 
 
 class LinearFPxAcc(torch.nn.Linear):
@@ -1912,6 +1939,9 @@ class LinearFPxAcc(torch.nn.Linear):
 
         lin24acc.weight = nnlin.weight
         lin24acc.trun_bits = trun_bits
+        lin24acc.chunk_size = kwargs.get("chunk_size", False)
+        lin24acc.fp8_dyn = kwargs.get("dynamic_fp8", False)
+        # available options are ["per_tensor", "per_token"]
 
         if nnlin.bias is not None:
             lin24acc.bias = nnlin.bias
@@ -1919,7 +1949,14 @@ class LinearFPxAcc(torch.nn.Linear):
 
     def forward(self, inputs):
         # This Linear Class will cast to BF16 before matmul and return FP32
-        return LinearFuncFPxFwdBwd.apply(inputs, self.weight, self.bias, self.trun_bits)
+        return LinearFuncFPxFwdBwd.apply(
+            inputs,
+            self.weight,
+            self.bias,
+            self.trun_bits,
+            self.chunk_size,
+            self.fp8_dyn,
+        )
 
     def extra_repr(self) -> str:
         """
@@ -1927,5 +1964,5 @@ class LinearFPxAcc(torch.nn.Linear):
         """
         return (
             f"in={self.in_features}, out={self.out_features}, bias={self.bias is not None}, "
-            f"trun_bits={self.trun_bits}"
+            f"trun_bits={self.trun_bits},fp8_dyn={self.fp8_dyn},chunk_size={self.chunk_size}"
         )
