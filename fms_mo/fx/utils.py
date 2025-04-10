@@ -15,12 +15,13 @@
 """Utils for FX graph parsing and external kernel lowering"""
 
 # Standard
-from typing import Any
+from typing import Any, Dict, Optional
 import logging
 import operator
 import os
 
 # Third Party
+import pandas as pd
 import torch
 
 # Local
@@ -317,7 +318,9 @@ def lname_to_org_name(Lname):
     return org_mod_name
 
 
-def get_org_mod_name_of_fx_node(node, gm=None, lut_fx2org={}):
+def get_org_mod_name_of_fx_node(
+    node, gm=None, lut_fx2org: Optional[Dict[str, str]] = None
+):
     """Given a FX node, could be call_module or call_fuction, find out the original module name,
     based on meta data
 
@@ -341,6 +344,8 @@ def get_org_mod_name_of_fx_node(node, gm=None, lut_fx2org={}):
         str: corresponding name on original graph
     """
     org_name = f"Unknown:{node.name}"
+    if lut_fx2org is None:
+        lut_fx2org = {}
     if "nn_module_stack" in node.meta:
         n_fx_mod_name = list(node.meta["nn_module_stack"].keys())[-1]
         n_fx_org_mod_name = list(node.meta["nn_module_stack"].values())[-1][0]
@@ -358,7 +363,7 @@ def get_org_mod_name_of_fx_node(node, gm=None, lut_fx2org={}):
                         org_name = v[: -len(suffix)]
                     break
 
-        if org_name is None:
+        if org_name.startswith("Unknown:"):
             org_name = lname_to_org_name(n_fx_org_mod_name)
 
     return org_name
@@ -429,7 +434,7 @@ def get_target_op_from_mod_or_str(mod_or_str, verbose=False):
 #############
 
 
-def model_size_Wb(mod, unit="MB"):
+def model_size_Wb(mod, unit="MB", print_to_file=True, show_details=False):
     """Checks model size, only count weight and bias
 
     NOTE:
@@ -443,40 +448,61 @@ def model_size_Wb(mod, unit="MB"):
     Returns:
         float: model size in desired unit
     """
+
     mem_use = 0
-    Nint8 = 0
-    Nfp32 = 0
+    if unit not in ["MB", "GB"]:
+        logger.warning(
+            f"Unrecognized unit for memory summary: {unit}. Will use MB instead."
+        )
+        unit = "MB"
+
+    summary_weights = {"layer": [], "shape": [], f"mem ({unit})": [], "dtype": []}
     for n, m in mod.named_modules():
         w = getattr(m, "weight", None)
+        w_dtype, w_shape = None, None
         if callable(w):  # see Note 1.
             w_mat, b_mat = w()[:2]
-            mem_use += (
+            mem_use = (
                 w_mat.numel() * w_mat.element_size()
                 + b_mat.numel() * b_mat.element_size()
             )
-            if w_mat.dtype in [torch.qint8, torch.quint8]:
-                Nint8 += 1
-            else:
-                logger.info(f"Parameter {n} should be int8 but is {w_mat.dtype}")
+            w_dtype = w_mat.dtype
+            w_shape = w_mat.shape
+
         elif isinstance(w, torch.Tensor):
-            mem_use += w.numel() * w.element_size()
+            mem_use = w.numel() * w.element_size()
             if hasattr(m, "bias") and m.bias is not None:
                 mem_use += m.bias.numel() * m.bias.element_size()
-            if w.dtype == torch.float32:
-                Nfp32 += 1
-            else:
-                logger.info(f"Parameter {n} should be fp32 but is {w.dtype}")
-    logger.info(
-        f"[check model size] Found {Nint8} INT8 and {Nfp32} "
-        "FP32 W/b tensors in this model."
+            w_dtype = w.dtype
+            w_shape = w.shape
+
+        if w_shape:
+            mem_use = mem_use / 1e9 if unit == "GB" else mem_use / 1e6
+
+            summary_weights["layer"].append(n)
+            summary_weights["shape"].append(w_shape)
+            summary_weights[f"mem ({unit})"].append(mem_use)
+            summary_weights["dtype"].append(w_dtype)
+
+    df_summary_weights = pd.DataFrame(summary_weights)
+    logger_or_print = logger.info if print_to_file else print
+    logger_or_print("[check model size] Summary of W/b tensors in this model:")
+    logger_or_print(
+        "\n%s",
+        str(
+            pd.pivot_table(
+                df_summary_weights,
+                index="dtype",
+                values=["layer", f"mem ({unit})"],
+                aggfunc={"layer": "count", f"mem ({unit})": "sum"},
+            )
+        ),
     )
 
-    if unit == "GB":
-        mem_use /= 1e9
-    else:
-        mem_use /= 1e6
+    if show_details:
+        logger_or_print(df_summary_weights.to_markdown())
 
-    return mem_use
+    return df_summary_weights[f"mem ({unit})"].sum().item()
 
 
 def plot_graph_module(
@@ -489,7 +515,7 @@ def plot_graph_module(
     skip_nodes=None,
     Nnode_to_plot=None,
     additional_coloring_rules=None,
-    lut_fx_mod_name_to_org={},
+    lut_fx_mod_name_to_org: Optional[Dict[str, str]] = None,
 ):
     """Plots a GraphModule in .SVG format to visualize the compute graph. If graphviz/pygraphviz is
     not installed properly, this function will just print out a message and do nothing.

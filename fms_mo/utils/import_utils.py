@@ -29,6 +29,7 @@ optional_packages = [
     "graphviz",
     "pygraphviz",
     "fms",
+    "triton",
 ]
 
 available_packages = {}

@@ -388,8 +388,10 @@ def parse_args():
     )
     parser.add_argument(
         "--do_lowering",
-        action="store_true",
-        help="convert QAT model to utilize real INT8 GPU kernel",
+        choices=["cutlass", "triton"],
+        type=str,
+        default=None,
+        help="convert QAT model to utilize real INT8 GPU kernel, 'cutlass' or 'triton'",
     )
 
     args = parser.parse_args()
@@ -1086,7 +1088,7 @@ def main():
         qmodel_prep(model, exam_inp, qcfg, optimizer, use_dynamo=True)
 
     # ---- [fms_mo] the following code are performing speed tests ----
-    elif args.do_lowering:
+    elif args.do_lowering in ["cutlass", "triton"]:
         # Standard
         from copy import deepcopy
         import time
@@ -1134,7 +1136,7 @@ def main():
             logger.info(
                 f"\n    {label} {'with' if comp_mode else 'without'} torch.compile"
             )
-            model_copy = deepcopy(model)
+            model_copy = deepcopy(model).half()
 
             if label == "int8":
                 qcfg = qconfig_init(recipe="qat_int8", args=args)
@@ -1158,7 +1160,11 @@ def main():
                     parent_mod = model_copy.get_submodule(parent_name)
                     qmod = getattr(parent_mod, module_name)
                     setattr(
-                        parent_mod, module_name, QLinearINT8Deploy.from_fms_mo(qmod)
+                        parent_mod,
+                        module_name,
+                        QLinearINT8Deploy.from_fms_mo(
+                            qmod, use_int_kernel=args.do_lowering
+                        ),
                     )
 
             if comp_mode is not False:
@@ -1172,7 +1178,7 @@ def main():
 
             # Median runtime using fixed input (in msec)
             med_runtime = speedtest(model_copy, exam_inp)
-            metrics = squad_eval(model_copy) if label == "int8" else {"f1": None}
+            metrics = squad_eval(model_copy)  # if label == "int8" else {"f1": None}
 
             summary["precision"].append(label)
             summary["compile mode"].append(comp_mode)
@@ -1385,6 +1391,7 @@ def main():
         )
         logger.info(f"Predict metrics: {predict_metric}")
 
+    log = {}
     if args.with_tracking:
         log = {
             "squad_v2" if args.version_2_with_negative else "squad": eval_metric,

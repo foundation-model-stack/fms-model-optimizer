@@ -71,7 +71,7 @@ def move_to(obj, device):
     return obj
 
 
-def mockbmm(mat1, mat2):
+def mockbmm(mat1, mat2, default_to_torch=False):
     """
     This function is used to mock the behavior of the bmm function in PyTorch.
     It is used to work around the fact that the bmm function in PyTorch is not
@@ -86,20 +86,23 @@ def mockbmm(mat1, mat2):
     """
     cf = sys._getframe()
     qbmm_mod = None
+    qbmm_lineno = cf.f_back.f_lineno
     while cf.f_back and qbmm_mod is None:
         # First frame is QBmm's forward itself, can start searching from previous stack
         cf = cf.f_back
-        if "forward" in cf.f_code.co_name or "_attn" in cf.f_code.co_name:
+        if (
+            "forward" in cf.f_code.co_name or "_attn" in cf.f_code.co_name
+        ) and "self" in cf.f_locals:
             mod_calling_bmm_function = cf.f_locals["self"]
             # If not found -> default to torch.matmul
-            qbmm_mod = getattr(
-                mod_calling_bmm_function, "QBmm" + str(cf.f_lineno), torch.matmul
-            )
+            qbmm_mod = getattr(mod_calling_bmm_function, f"QBmm{qbmm_lineno}", None)
     del cf
+    if qbmm_mod is None and default_to_torch:
+        qbmm_mod = torch.matmul
     return qbmm_mod(mat1, mat2)
 
 
-def mockmatmul(mat1, mat2):
+def mockmatmul(mat1, mat2, default_to_torch=False):
     """
     Patches torch.matmul() with QBmm( torch.bmm() )
 
@@ -109,29 +112,37 @@ def mockmatmul(mat1, mat2):
 
     Returns:
         torch.Tensor: The result of the mock matrix multiplication.
+    NOTE:
+        1. First frame is mockmatmul itself. One frame back (cf.f_back) is where torch.matmul
+            happened, whose line number is the one used for QBmm<xxx>
+        2. QBmm module may not be attached to the immediate frame where torch.matmul happened. Need
+            to trace back and find the frame with both "forward" in name and "self" in locals, i.e.
+            a class (nn.module) has a function named "forward" something
+        3. Keep default_to_torch=False unless really needed, otherwise if something went wrong with
+            QBmm detection, it could go to default silently, which would be very difficult to debug.
     """
     cf = sys._getframe()
     qbmm_mod = None
+    qbmm_lineno = cf.f_back.f_lineno
     while cf.f_back and qbmm_mod is None:
-        # First frame is QBmm's forward itself, can start searching from previous stack
         cf = cf.f_back
-        if "forward" in cf.f_code.co_name or "_attn" in cf.f_code.co_name:
+        if (
+            "forward" in cf.f_code.co_name or "_attn" in cf.f_code.co_name
+        ) and "self" in cf.f_locals:
             mod_calling_bmm_function = cf.f_locals["self"]
             # If not found -> default to torch.bmm
-            qbmm_mod = getattr(
-                mod_calling_bmm_function, "QBmm" + str(cf.f_lineno), torch.bmm
-            )
+            qbmm_mod = getattr(mod_calling_bmm_function, f"QBmm{qbmm_lineno}", None)
     del cf
 
     # Didn't find the corresponding QBmm, default the call to torch.bmm
-    if qbmm_mod == torch.bmm:
+    if qbmm_mod is None and default_to_torch:
         org_batch_header = mat1.shape[:2]
         # Need to double check m1/m2 are 3d, otherwise reshape
         if len(mat1.shape) > 3:
             mat1 = mat1.reshape([-1, mat1.shape[-2], mat1.shape[-1]])
         if len(mat2.shape) > 3:
             mat2 = mat2.reshape([-1, mat2.shape[-2], mat2.shape[-1]])
-        output = qbmm_mod(mat1, mat2)
+        output = torch.bmm(mat1, mat2)
         output = output.reshape([*org_batch_header, *output.shape[1:]])
         return output
     return qbmm_mod(mat1, mat2)
@@ -147,6 +158,9 @@ def patch_torch_bmm(qcfg):
     if qcfg is not None:
         # could be 'torch.bmm', 'torch.matmul', or None
         ops_to_patch = qcfg.get("which2patch_contextmanager", None)
+        # if qcfg["bmm_prep"]["bmm_only_in_self_attn"] is False, may need to enable default_to_torch
+        # in mock functions, e.g. partial(mockmatmul, default_to_torch=True)
+        # This is in case a model uses extra matmuls, and QBmmXXX is not found or attached properly.
         new_target = (
             mockbmm
             if ops_to_patch == "torch.bmm"

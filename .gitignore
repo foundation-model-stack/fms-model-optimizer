@@ -42,6 +42,7 @@ error.log
 
 # Files generated from running examples
 fms_mo.log
-data_train/
-data_test/
+data*_train/
+data*_test/
 act_scales/
+examples/

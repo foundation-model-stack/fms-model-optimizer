@@ -364,7 +364,7 @@ class QBmmINT8Deploy(nn.Module):
         qbmm_int.num_bits_m1 = fms_mo_qbmm.num_bits_m1
         qbmm_int.num_bits_m2 = fms_mo_qbmm.num_bits_m2
         qcfg = getattr(fms_mo_qbmm, "qcfg", None)
-        qbmm_int.useINTkernel = False  # always False until int kernel is implemented
+        qbmm_int.use_int_kernel = False  # always False until int kernel is implemented
         qbmm_int.use_PT_native_Qfunc = qcfg["use_PT_native_Qfunc"] if qcfg else False
 
         with torch.no_grad():
@@ -438,7 +438,7 @@ class QBmmINT8Deploy(nn.Module):
         """
         return (
             f"nbits_m1,m2={self.num_bits_m1},{self.num_bits_m2}, "
-            f"useINTkernel={self.useINTkernel}"
+            f"use_int_kernel={self.use_int_kernel}"
         )
 
     def forward(self, m1: torch.Tensor, m2: torch.Tensor) -> torch.Tensor:

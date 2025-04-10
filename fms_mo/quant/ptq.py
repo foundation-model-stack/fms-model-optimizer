@@ -1943,14 +1943,12 @@ class RunModule(nn.Module):
     def forward(self, inp, **kwargs):
         self.qcfg["cached_block0_input"].append(inp.cpu())
         self.qcfg["cache_id"] += 1
-        for k, v in kwargs.items():
-            if k == "attention_mask":
-                if v is not None:
-                    self.qcfg["cached_mask"].append(v.cpu())
-            if k == "alibi":
-                self.qcfg["cached_alibi"].append(v.cpu())
-            if k == "position_ids":
-                self.qcfg["position_ids"].append(v.cpu())
+        for kw_org, kw_qcfg in self.qcfg["kw_to_cache"].items():
+            if kw_qcfg not in self.qcfg:
+                self.qcfg[kw_qcfg] = []
+            v = kwargs.get(kw_org, None)
+            if v is not None:
+                self.qcfg[kw_qcfg].append(move_to(v, "cpu"))
         raise ValueError
 
 
@@ -1965,14 +1963,15 @@ class RunFMModule(nn.Module):
         self.module = module
 
     def forward(self, **kwargs):
-        for k, v in kwargs.items():
-            if k == "x":
-                self.qcfg["cached_block0_input"][self.qcfg["cache_id"]] = v.cpu()
-                self.qcfg["cache_id"] += 1
-            if k == "mask":
-                self.qcfg["cached_mask"] = v.cpu()
-            if k == "rel_pos_bias":
-                self.qcfg["cached_pos_bias"] = v.cpu()
+        self.qcfg["cached_block0_input"][self.qcfg["cache_id"]] = kwargs["x"].cpu()
+        self.qcfg["cache_id"] += 1
+        for kw_org, kw_qcfg in self.qcfg["kw_to_cache"]:
+            if kw_qcfg not in self.qcfg:
+                self.qcfg[kw_qcfg] = []
+            v = kwargs.get(kw_org, None)
+            if v is not None:
+                self.qcfg[kw_qcfg].append(v.cpu())
+
         raise ValueError
 
 
@@ -2126,13 +2125,21 @@ def cache_block0_inputs(
     qcfg["cache_id"] = 0
     qcfg["cached_mask"] = []
     qcfg["cached_alibi"] = []
-    qcfg[
-        "position_ids"
-    ] = []  # latest transformers requires pos_ids to be fed into fwd()
     # move block0 to GPU and excuting fwd() until finish block0
     if "fms" in qcfg["model_type"]:
+        qcfg["kw_to_cache"] = {
+            "mask": "cached_mask",
+            "rel_pos_bias": "cached_pos_bias",
+        }
         blocks[0] = RunFMModule(blocks[0], qcfg)
     else:
+        # latest transformers requires pos_ids to be fed into fwd()
+        qcfg["kw_to_cache"] = {
+            "attention_mask": "cached_mask",
+            "alibi": "cached_alibi",
+            "position_ids": "position_ids",
+            "position_embeddings": "position_embeddings",
+        }
         blocks[0] = RunModule(blocks[0], qcfg)
 
     if isinstance(dloader, torch.utils.data.DataLoader):
@@ -2464,12 +2471,13 @@ def get_module_act_scales(m, block_idx, qcfg, act_scales):
                 alibi=qcfg["cached_alibi"][i].unsqueeze(0).to(dev),
             )[0].cpu()
         else:
+            kwargs = {
+                kw_org: move_to(qcfg[kw_qcfg][i], dev) if qcfg[kw_qcfg] != [] else None
+                for kw_org, kw_qcfg in qcfg["kw_to_cache"].items()
+            }
             qcfg["cached_input"][i] = m(
                 qcfg["cached_input"][i].to(dev),
-                attention_mask=None
-                if qcfg["cached_mask"] == []
-                else qcfg["cached_mask"][i].to(dev),
-                position_ids=qcfg["position_ids"][i].to(dev),
+                **kwargs,
             )[0].cpu()
     for h in hooks:
         h.remove()
@@ -2482,7 +2490,7 @@ def get_act_scales_1gpu(model, dloader, qcfg):
     """
     get activation blocks on 1gpu for very large models that cannot fit in 1gpu
     """
-    dev = "cuda:0"
+    dev = "cuda"
     qcfg["batch_size"] = 1
     qcfg["loader_len"] = len(dloader)
     qcfg["dtype"] = next(iter(model.parameters())).dtype

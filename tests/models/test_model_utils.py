@@ -26,6 +26,7 @@ from torch.nn import Conv2d, Linear
 import torch
 
 # Local
+from fms_mo.modules.bmm import QBmm
 from fms_mo.modules.conv import DetQConv2d, QConv2d, QConv2dPTQ, QConv2dPTQv2
 from fms_mo.modules.linear import QLinear
 from fms_mo.utils.qconfig_utils import serialize_config
@@ -99,7 +100,7 @@ def count_qmodules(model: torch.nn.Module):
     """
     torch_modules, fms_qmodules = [], []
     for n, m in model.named_modules():
-        if isinstance(m, (QConv2d, QLinear)):
+        if isinstance(m, (QConv2d, QLinear, QBmm)):
             fms_qmodules.append((n, m))
         elif isinstance(m, (Conv2d, Linear)):
             torch_modules.append((n, m))

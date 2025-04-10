@@ -19,6 +19,9 @@ import logging
 # Third Party
 import torch
 
+# pylint: disable=unused-argument
+# gptq op must be registered with specific I/O, even if not in use by the op function
+
 logger = logging.getLogger(__name__)
 
 

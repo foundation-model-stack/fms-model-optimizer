@@ -28,7 +28,6 @@ from fms.modules.linear import (
 from fms.modules.tp import ShardType, TPModule
 from fms.utils.gptq import GPTQLinearConfig
 import torch
-import torch.nn as nn
 
 # Local
 from fms_mo.aiu_addons.gptq.gptq_aiu_op import register_aiu_gptq_op
@@ -36,7 +35,11 @@ from fms_mo.aiu_addons.gptq.gptq_aiu_op import register_aiu_gptq_op
 register_aiu_gptq_op()
 
 
-class GPTQLinearAIU(nn.Module):
+class GPTQLinearAIU(torch.nn.Module):
+    """Simplified QLinear that wraps GPTQ W4A16 custom operation.
+    gptq_gemm.i4f16_fxinputs_aiu must have been pre-registered to use this class.
+    """
+
     def __init__(
         self,
         in_features: int,
@@ -112,6 +115,8 @@ class GPTQLinearAIU(nn.Module):
         self.aiu_op = torch.ops.gptq_gemm.i4f16_fxinputs_aiu
 
     def forward(self, x):
+        """Call pre-registered custom GPTQ operation"""
+
         x = self.aiu_op(
             x.half(),
             self.qweight,
@@ -136,8 +141,10 @@ def get_gptq_aiu_linear(
     in_features: int,
     out_features: int,
     bias: bool,
-    linear_config: Optional[Mapping[str, Any]] = None,
-):
+    linear_config: Mapping[str, Any],
+) -> torch.nn.Module:
+    """Retrieve a GPTQ W4A16 Linear module"""
+
     gptq_config = GPTQLinearConfig(**linear_config)
     if gptq_config.desc_act:
         raise NotImplementedError(

@@ -33,10 +33,17 @@ def test_i8i8_registration() -> None:
 
 def test_i8i8_op(
     get_i8i8_gemm_inputs: tuple[
-        torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, str, str, bool
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        str,
+        str,
+        bool,
+        torch.Tensor,
     ],
 ) -> None:
-    """Validate output shapes of INT8xINT8 matmul.
+    """Validate output shapes and content of INT8xINT8 matmul.
     Computations are simulated, using quantized/dequantized tensors.
     """
 
@@ -48,7 +55,12 @@ def test_i8i8_op(
         weight_quant_type,
         activ_quant_type,
         smoothquant,
+        reference_out,
     ) = get_i8i8_gemm_inputs
+
+    # enforce fp16 dtype on all fp parameters for this test
+    x = x.to(torch.float16)
+    qdata = qdata.to(torch.float16)
 
     out = torch.ops.fms_mo.i8i8_aiu(
         x,
@@ -60,4 +72,7 @@ def test_i8i8_op(
         smoothquant,
     )
 
-    assert out.size() == torch.Size((x.size()[:-1] + (weight.size(0),)))
+    error_tolerance = 1e-4  # TODO: this needs adjusting
+    assert out.size() == x.size()[:-1] + (weight.size(0),)
+    assert torch.all((out - reference_out).abs() < error_tolerance)
+    # assert torch.linalg.norm(out - reference_out) < error_tolerance  # alternative check

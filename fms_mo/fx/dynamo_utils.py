@@ -17,6 +17,7 @@ can be found in fms_mo/utils.
 """
 
 # Standard
+from typing import Dict, Optional
 import logging
 
 # Third Party
@@ -30,6 +31,36 @@ from fms_mo.fx.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+# From PyTorch 2.5+, graphModule received in dynamo custom backend will be Aten IR instead of FX IR,
+# i.e. no "call_module" nodes, all parameter tensors become "placeholder" nodes, and etc...
+# This following flag will make dynamo behaves like PyTorch 2.4. Only use it when model_analyzer()
+# really stop working and hard to recover.
+# Ref: https://pytorch.org/tutorials/recipes/regional_compilation.html
+
+# torch._dynamo.config.inline_inbuilt_nn_modules = False
+
+
+def run_fwd_once(model, sample_inp):
+    """Convenient function to run model once using correct input unpack."""
+    with torch.no_grad():
+        if isinstance(sample_inp, dict) or all(
+            hasattr(sample_inp, k) for k in ("keys", "values", "items")
+        ):
+            out = model(**sample_inp)
+        elif isinstance(sample_inp, tuple):
+            out = model(*sample_inp)
+        elif isinstance(sample_inp, torch.Tensor):
+            out = model(sample_inp)
+        else:
+            try:
+                #   assume user provided input is ready-to-run...
+                out = model(sample_inp)
+            except RuntimeError:
+                logger.info(
+                    f"Unknown data structure for example_input.{type(sample_inp)} Please check."
+                )
+    return out
 
 
 def dfs_gm(
@@ -46,7 +77,7 @@ def dfs_gm(
     prescreenOp=None,
     hook=None,
     return_nodes=False,
-    lut_fx_mod_name_to_org={},
+    lut_fx_mod_name_to_org: Optional[Dict[str, str]] = None,
 ):
     """Depth-First Search at FX IR level, to replace our old TorchScript equivalent func
     Because FX IR is a higher level IR, should have much fewer
@@ -227,7 +258,11 @@ def dfs_gm(
     return node_found
 
 
-def find_conv_on_shortcut_gm(gm: torch.fx.GraphModule, lut_fx_mod_name_to_org={}):
+def find_conv_on_shortcut_gm(
+    gm: torch.fx.GraphModule,
+    lut_fx_mod_name_to_org: Optional[Dict[str, str]] = None,
+    lut_name_to_mod=None,
+):
     """Identify Conv on shortcut using FX GM DFS
     It's (almost) specific for ResNet-like CNNs, will return a list of module names (as used in the
     original model, not FX module names)
@@ -250,6 +285,9 @@ def find_conv_on_shortcut_gm(gm: torch.fx.GraphModule, lut_fx_mod_name_to_org={}
 
     5. count levels of each branch, decide which one is the shortcut
     """
+
+    if lut_name_to_mod is None:
+        lut_name_to_mod = {}
 
     # 1. Find "add" nodes, including inplace add as some may use "out+=shortcut"
     nodes_add = dfs_gm(gm, ["add"], return_nodes=True)
@@ -334,9 +372,13 @@ def find_conv_on_shortcut_gm(gm: torch.fx.GraphModule, lut_fx_mod_name_to_org={}
                 if n_conv_i.op == "call_module":
                     conv_mod = gm.get_submodule(n_conv_i.target)
                 else:
-                    conv_mod = get_org_mod_name_of_fx_node(
+                    # in case aten IR is being used
+                    conv_mod_name = get_org_mod_name_of_fx_node(
                         n_conv_i, lut_fx2org=lut_fx_mod_name_to_org
                     )
+                    conv_mod = lut_name_to_mod.get(conv_mod_name, None)
+                    if not isinstance(conv_mod, torch.nn.Conv2d):
+                        continue
                 if conv_mod.out_channels > conv_mod.in_channels:  # see Note 2
                     qconv_candidate.append(
                         get_org_mod_name_of_fx_node(
@@ -352,7 +394,7 @@ def find_1st_last_gm(
     firstOps=None,
     lastOps=None,
     return_1st_last_sep=False,
-    lut_fx_mod_name_to_org={},
+    lut_fx_mod_name_to_org: Optional[Dict[str, str]] = None,
 ):
     """Identify the first and last layer of interests
     Usually only interested in Conv and Linear, but could be others as well
@@ -403,7 +445,11 @@ def find_1st_last_gm(
 
 
 def find_single_sided_op_gm(
-    gm, op_of_interest=None, return_LUTs=False, verbose=False, lut_fx_mod_name_to_org={}
+    gm,
+    op_of_interest=None,
+    return_LUTs=False,
+    verbose=False,
+    lut_fx_mod_name_to_org: Optional[Dict[str, str]] = None,
 ):
     """Try to determine the "polarity" of output of "every nodes" based on their inputs and the Op
     itself, then decide which Conv/Linear (or user-specified Op) will use single-sided quantizer
@@ -576,7 +622,9 @@ def find_single_sided_op_gm(
     return SingleSidedOps
 
 
-def find_qkvsync_candidates_gm(gm, return_nodes=False, lut_fx_mod_name_to_org={}):
+def find_qkvsync_candidates_gm(
+    gm, return_nodes=False, lut_fx_mod_name_to_org: Optional[Dict[str, str]] = None
+):
     """Identify groups of Linears that share the same parent. It's a transformer-specific feature.
 
     NOTE:
@@ -626,7 +674,7 @@ def find_qkvsync_candidates_gm(gm, return_nodes=False, lut_fx_mod_name_to_org={}
     return my_1st_sibling
 
 
-def find_silu_gm(gm, lut_fx_mod_name_to_org={}):
+def find_silu_gm(gm, lut_fx_mod_name_to_org: Optional[Dict[str, str]] = None):
     """Special handle for Conv following silu, specific for EffDet and etc
     LLM could use SiLU as well (llama?), but not relavent to this func
     """
@@ -646,7 +694,12 @@ def find_silu_gm(gm, lut_fx_mod_name_to_org={}):
     return siluConv
 
 
-def find_rpn_fpn_gm(gm, verbose=False, Nsubgraph=0, lut_fx_mod_name_to_org={}):
+def find_rpn_fpn_gm(
+    gm,
+    verbose=False,
+    Nsubgraph=0,
+    lut_fx_mod_name_to_org: Optional[Dict[str, str]] = None,
+):
     """For object detection CNN models, RPN (RegionProposalNetwork) and FPN (FeaturePyramidNetwork)
     are commonly used. prefer to skip them, but may be ok to quantize in some cases.
 
@@ -750,7 +803,7 @@ def find_rpn_fpn_gm(gm, verbose=False, Nsubgraph=0, lut_fx_mod_name_to_org={}):
     return fpn_convs
 
 
-def find_and_prep_bmm_gm(gm, lut_fx_mod_name_to_org={}):
+def find_and_prep_bmm_gm(gm, lut_fx_mod_name_to_org: Optional[Dict[str, str]] = None):
     """Previously with TorchScript, we use this func to perform 2 tasks:
         a) create QBmms, and then attach them to the model,
         b) set up qcfg["which2patch_contextmanager"] so that patch_torch_bmm() context
@@ -791,14 +844,16 @@ def find_and_prep_bmm_gm(gm, lut_fx_mod_name_to_org={}):
         return_dict["which2patch_contextmanager"] = "torch.matmul"
         LUT2sort = all_matmuls
     else:
-        warn_msg = None
         if Nbmm_found > 0 and Nmatmul_found > 0:
-            warn_msg = "Both bmm and matmul are found. Not sure which to patch."
-        elif Nbmm_found == 0 and Nmatmul_found == 0 and len(all_sdpas) > 0:
-            warn_msg = "No bmm and matmul are found. Likely SDPA is enabled."
+            raise RuntimeError(
+                "Both bmm and matmul are found. Not sure which to patch."
+            )
+        if Nbmm_found == 0 and Nmatmul_found == 0 and len(all_sdpas) > 0:
+            logger.warning(
+                "No bmm and matmul are found. Likely SDPA is enabled. "
+                "Will patch nothing!"
+            )
 
-        if warn_msg:
-            logger.warning(f"{warn_msg} Will patch nothing.")
         return return_dict
 
     LUTmodname2linenum = {}  # see Note 4
@@ -989,20 +1044,22 @@ def model_analyzer(
             for _, m in gm_fx.named_modules()
             if isinstance(m, torch.nn.Conv2d) or issubclass(type(m), torch.nn.Conv2d)
         ]
-        if len(all_conv) > 0:
-            skip_candidates += find_conv_on_shortcut_gm(gm_fx, lut_fx_mod_name_to_org)
+        # if gm is using aten IR, only ops can be seen, no modules.
+        conv_ops = dfs_gm(
+            gm_fx,
+            targetOp=[torch.nn.Conv2d, torch.nn.functional.conv2d],
+            return_nodes=True,
+        )
+        lut_name_to_mod = {n: m for m, n in qcfg["LUTmodule_name"].items()}
+        if len(all_conv) > 0 or len(conv_ops) > 0:
+            skip_candidates += find_conv_on_shortcut_gm(
+                gm_fx, lut_fx_mod_name_to_org, lut_name_to_mod
+            )
 
-        # Check 2. first/last, see Note 2 and 3
+        # Check 2. first/last, see Note 2 and 3, NOTE that transformers are handled differently
         if qcfg["N_backend_called"] > 1:
             skip_candidates += []
-        elif is_transformers:
-            _, last_only = find_1st_last_gm(
-                gm_fx,
-                return_1st_last_sep=True,
-                lut_fx_mod_name_to_org=lut_fx_mod_name_to_org,
-            )
-            skip_candidates += last_only
-        else:
+        elif not is_transformers:
             # see Note 4
             skip_candidates += find_1st_last_gm(
                 gm_fx, lut_fx_mod_name_to_org=lut_fx_mod_name_to_org
@@ -1038,6 +1095,25 @@ def model_analyzer(
                 "which2patch_contextmanager"
             ]
             qcfg["bmm_prep"]["layers_with_bmm"].update(temp_dict["layers_with_bmm"])
+            # make sure there are ONLY 2 bmm per layer (self_attention). some models may use
+            # additional bmm/matmuls. Raise warning if that's the case.
+            num_layers = len(temp_dict["layers_with_bmm"])
+            num_bmms = 0
+            seen_line_num = []
+            for line_nums in temp_dict["layers_with_bmm"].values():
+                num_bmms += len(line_nums)
+                for line_num in line_nums:
+                    if line_num not in seen_line_num:
+                        seen_line_num.append(line_num)
+            qcfg["bmm_prep"]["bmm_only_in_self_attn"] = True
+            if num_bmms != num_layers * 2 or len(seen_line_num) != 2:
+                qcfg["bmm_prep"]["bmm_only_in_self_attn"] = False
+                logger.warning(
+                    "This model uses additional matmul/bmm other than those in self-attention. "
+                    "If you plan to quantize self-attention, please note that the additional bmms "
+                    "may also be quantized!"
+                    f"{temp_dict['layers_with_bmm']}\n"
+                )
 
         # Check 7: QKV
         temp_dict = find_qkvsync_candidates_gm(
@@ -1057,6 +1133,7 @@ def model_analyzer(
     from functools import partial
 
     # Third Party
+    from torchvision.models import VisionTransformer
     from transformers import PreTrainedModel
 
     if issubclass(type(model), torch.nn.Module):
@@ -1068,6 +1145,7 @@ def model_analyzer(
         model_to_be_traced = model
         model_param_size = 999
 
+    is_transformers = issubclass(type(model), (PreTrainedModel, VisionTransformer))
     if model_param_size > 1:
         # Standard
         import sys
@@ -1077,7 +1155,7 @@ def model_analyzer(
 
     cus_bknd = partial(
         cus_backend_model_analyzer,
-        is_transformers=issubclass(type(model), PreTrainedModel),
+        is_transformers=is_transformers,
         plotsvg=plotsvg,
     )
 
@@ -1090,27 +1168,38 @@ def model_analyzer(
     if "bmm_prep" not in qcfg:
         qcfg["bmm_prep"] = {"which2patch_contextmanager": None, "layers_with_bmm": {}}
 
+    if is_transformers:
+        # NOTE simplified method to determine 1st/last modules for transformers.
+        # will not work if model has multiple parallel heads at the end, e.g. obj det
+        def call_seq_hook(mod, *_args, **_kwargs):
+            qcfg["mod_call_seq"].append(lut_weight2modname[mod.weight])
+
+        h_hooks = []
+        qcfg["mod_call_seq"] = []
+        for n, m in model.named_modules():
+            if isinstance(m, (torch.nn.Linear, torch.nn.Conv2d)):
+                h_hooks.append(m.register_forward_hook(call_seq_hook))
+
+        with torch.no_grad():
+            run_fwd_once(model, sample_inp)
+
+        for h in h_hooks:
+            h.remove()
+
+        # only add last layer
+        qcfg["qskip_layer_name"] += [qcfg["mod_call_seq"][-1]]
+        # unless it's a ViT, skip first Conv as well
+        if issubclass(type(model), VisionTransformer) and isinstance(
+            model.get_submodule(qcfg["mod_call_seq"][0]), torch.nn.Conv2d
+        ):
+            qcfg["qskip_layer_name"] += [qcfg["mod_call_seq"][0]]
+
     with torch.no_grad():
         model_opt = torch.compile(
             model_to_be_traced,
             backend=cus_bknd,
         )
-        if isinstance(sample_inp, dict) or all(
-            hasattr(sample_inp, k) for k in ("keys", "values", "items")
-        ):
-            model_opt(**sample_inp)
-        elif isinstance(sample_inp, tuple):
-            model_opt(*sample_inp)
-        elif isinstance(sample_inp, torch.Tensor):
-            model_opt(sample_inp)
-        else:
-            try:
-                #   assume user provided input is ready-to-run...
-                model_opt(sample_inp)
-            except RuntimeError:
-                logger.info(
-                    f"Unknown data structure for example_input.{type(sample_inp)} Please check."
-                )
+        run_fwd_once(model_opt, sample_inp)
 
         del model_opt
 
@@ -1153,7 +1242,35 @@ def model_analyzer(
                 )
                 setattr(mod_bmm_happened, f"QBmm{ln}", newQBmm)
 
-    # c) identify RPN/FPN TODO this hack only works for torchvision models. will use find_rpn_fpn_gm()
+        # add auto QBmm check to last layer if any QBmms in model (only for transformers)
+        def qbmm_auto_check(_mod, *_args, **_kwargs):
+            """Automatic QBmm check. This hook will be attached to the last module and check once
+            only at the end of first forward() call. Throw a "warning" if a model has QBmm attached
+            but not called (as it could be intentional.)
+            """
+            num_called_qbmms = []
+            for lay, line_nums in qcfg["bmm_prep"]["layers_with_bmm"].items():
+                for ln in line_nums:
+                    qbmm_i = model.get_submodule(f"{lay}.QBmm{ln}")
+                    num_called_qbmms.append(qbmm_i.num_module_called == 1)
+
+            if not all(num_called_qbmms):
+                err_msg = (
+                    "QBmms were attached but not called during forward()."
+                    "Possibly patch_torch_bmm() context manager is missing."
+                )
+                if qcfg["force_stop_if_qbmm_auto_check_failed"]:
+                    raise RuntimeError(err_msg)
+                logger.warning(err_msg)
+
+            qcfg["hook_qbmm_auto_check"].remove()
+
+        last_mod = model.get_submodule(qcfg["mod_call_seq"][-1])
+        qcfg["hook_qbmm_auto_check"] = last_mod.register_forward_hook(qbmm_auto_check)
+
+    # c) identify RPN/FPN
+    # TODO this hack only works for torchvision models. will use find_rpn_fpn_gm()
+
     # Third Party
     from torchvision.models.detection.rpn import RegionProposalNetwork
     from torchvision.ops import FeaturePyramidNetwork

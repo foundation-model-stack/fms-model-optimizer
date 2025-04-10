@@ -36,9 +36,7 @@ FMS Model Optimizer is a framework for developing reduced precision neural netwo
 ### Requirements
 
 1. **🐧 Linux system with Nvidia GPU (V100/A100/H100)**
-2. Python 3.9 to Python 3.11
-
-    📋 Python 3.12 is currently not supported due to PyTorch Dynamo constraint
+2. Python 3.10 to Python 3.12
 3. CUDA >=12
 
 *Optional packages based on optimization functionality required:*
@@ -47,9 +45,12 @@ FMS Model Optimizer is a framework for developing reduced precision neural netwo
     - [auto_gptq](https://pypi.org/project/auto-gptq/) or build from [source](https://github.com/AutoGPTQ/AutoGPTQ)
 - If you want to experiment with **INT8** deployment in [QAT](./examples/QAT_INT8/) and [PTQ](./examples/PTQ_INT8/) examples:
     - Nvidia GPU with compute capability > 8.0 (A100 family or higher)
-    - [Ninja](https://ninja-build.org/)
-    - Clone the [CUTLASS](https://github.com/NVIDIA/cutlass) repository
-    - `PyTorch 2.3.1` (as newer version will cause issue for the custom CUDA kernel used in these examples)
+    - Option 1:
+        - [Ninja](https://ninja-build.org/)
+        - Clone the [CUTLASS](https://github.com/NVIDIA/cutlass) repository
+        - `PyTorch 2.3.1` (as newer version will cause issue for the custom CUDA kernel used in these examples)
+    - Option 2:
+        - use triton kernel included. But this kernel is currently not faster than FP16.
 - **FP8** is a reduced precision format like **INT8**:
     - Nvidia A100 family or higher
     - [llm-compressor](https://github.com/vllm-project/llm-compressor)

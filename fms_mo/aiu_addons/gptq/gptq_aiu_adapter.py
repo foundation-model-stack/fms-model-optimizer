@@ -23,6 +23,7 @@ import torch
 
 def _gptq_qweights_transpose_aiu(
     input_sd: Mapping[str, torch.Tensor],
+    **kwargs,  # pylint: disable=unused-argument
 ) -> Mapping[str, torch.Tensor]:
     new_sd = {}
     for name, param in input_sd.items():
@@ -41,6 +42,9 @@ serialization.register_adapter_step(
 serialization.register_adapter_step(
     "gpt_bigcode", "gptq_qweights_transpose_aiu", _gptq_qweights_transpose_aiu
 )
+serialization.register_adapter_step(
+    "granite", "gptq_qweights_transpose_aiu", _gptq_qweights_transpose_aiu
+)
 serialization.register_adapter(
     "llama",
     "hf_gptq_aiu",
@@ -56,4 +60,15 @@ serialization.register_adapter(
     "gpt_bigcode",
     "hf_gptq_aiu",
     ["hf_to_fms_names", "weight_fusion", "gptq_qweights_transpose_aiu"],
+)
+serialization.register_adapter(
+    "granite",
+    "hf_gptq_aiu",
+    [
+        "hf_to_fms_names",
+        "hf_to_fms_rope",
+        "hf_gptq_fusion_check",
+        "weight_fusion",
+        "gptq_qweights_transpose_aiu",
+    ],
 )

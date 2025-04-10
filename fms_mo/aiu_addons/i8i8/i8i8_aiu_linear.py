@@ -15,7 +15,9 @@
 
 # Standard
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional
+from functools import partial
+from typing import Any, Callable, Optional, Union
+import copy
 
 # Third Party
 from fms.modules.linear import (
@@ -28,7 +30,6 @@ from fms.modules.linear import (
 from fms.modules.tp import ShardType, TPModule
 from fms.utils.config import ModelConfig
 import torch
-import torch.nn as nn
 
 # Local
 from fms_mo.aiu_addons.i8i8.i8i8_aiu_op import register_aiu_i8i8_op
@@ -38,6 +39,8 @@ register_aiu_i8i8_op()
 
 @dataclass
 class W8A8LinearConfig(ModelConfig):
+    """Configuration for W8A8 Linear module"""
+
     linear_type: str = "int8"
     bits: int = 8
     weight_per_channel: bool = False
@@ -46,8 +49,10 @@ class W8A8LinearConfig(ModelConfig):
     smoothquant_layers: Optional[list] = None
 
 
-class W8A8LinearAIU(nn.Module):
-    """Simplified QLinear that wraps quantize/dequantize operation"""
+class W8A8LinearAIU(torch.nn.Module):
+    """Simplified QLinear that wraps quantize/dequantize operation.
+    fms_mo.i8i8_aiu must have been pre-registered to use this class.
+    """
 
     def __init__(
         self,
@@ -79,10 +84,10 @@ class W8A8LinearAIU(nn.Module):
             "weight",
             torch.zeros(out_features, in_features, dtype=torch.int8),
         )
-        if bias:
-            self.register_buffer(
-                "bias", torch.zeros((out_features), dtype=torch.float16)
-            )
+
+        self.has_bias = bias
+        bias_size = out_features if self.has_bias else 1
+        self.register_buffer("bias", torch.zeros((bias_size), dtype=torch.float16))
 
         if config.weight_per_channel:
             w_clip_size = out_features
@@ -187,20 +192,44 @@ class W8A8LinearAIU(nn.Module):
         return (
             f"{self.__class__.__name__}"
             f"(in={self.in_features}, out={self.out_features}, "
-            f"bias={self.bias is not None}, wq={self.weight_quant_type}, "
+            f"bias={self.has_bias}, wq={self.weight_quant_type}, "
             f"aq={self.activ_quant_type}, smoothq={self.smoothquant}, "
             f"op={self.aiu_op})"
         )
+
+
+def update_from_partial(
+    linear_config: dict[Union[str, Callable], Any],
+) -> dict[Union[str, Callable], Any]:
+    """Update linear config parameters using those of partial callable"""
+
+    linear_config_updated = copy.deepcopy(linear_config)
+    for k, v in linear_config["linear_type"].keywords.items():
+        linear_config_updated[k] = v
+    return linear_config_updated
 
 
 def get_int8_aiu_linear(
     in_features: int,
     out_features: int,
     bias: bool,
-    linear_config: Optional[Mapping[str, Any]] = None,
-    use_smoothquant: bool = True,
-):
-    int8_config = W8A8LinearConfig(**linear_config)
+    linear_config: dict[Union[str, Callable], Any],
+    linear_type: Optional[str] = None,
+    use_smoothquant: bool = False,
+) -> torch.nn.Module:
+    """Retrieve a W8A8 Linear module"""
+
+    # Preprocess linear_config if its linear_type field is a callable
+    # (which would not initialize correctly the dataclass parameters).
+    # We don't want to alter the original linear_config though.
+    linear_config_for_dataclass: Optional[dict[Union[str, Callable], Any]] = None
+    if callable(linear_config["linear_type"]):
+        linear_config_for_dataclass = update_from_partial(linear_config)
+        linear_config_for_dataclass["linear_type"] = linear_type
+    if not linear_config_for_dataclass:
+        linear_config_for_dataclass = linear_config
+
+    int8_config = W8A8LinearConfig(**linear_config_for_dataclass)
     linear = W8A8LinearAIU(
         in_features=in_features,
         out_features=out_features,
@@ -216,8 +245,7 @@ def shard_int8_aiu_linear(
     tp_module: TPModule,
     module_sharding_info: dict[str, LinearModuleShardingInfo],
 ) -> Optional[set]:
-    """
-    Set up INT8 (W8A8) quantization parameters to be sharded onto
+    """Set up INT8 (W8A8) quantization parameters to be sharded onto
     AIU-compliant linear modules
 
                          |     GPU     |
@@ -273,9 +301,23 @@ def shard_int8_aiu_linear(
     )
 
     raise NotImplementedError("TP not yet supported for INT8. Work in progress")
+    # return unused_keys
 
-    return unused_keys
 
-
-register_linear_type_to_module_map("int8_aiu", get_int8_aiu_linear)
+register_linear_type_to_module_map(
+    "int8_aiu",
+    partial(
+        get_int8_aiu_linear,
+        linear_type="int8_aiu",
+        use_smoothquant=False,
+    ),
+)
+register_linear_type_to_module_map(
+    "int8_smoothquant_aiu",
+    partial(
+        get_int8_aiu_linear,
+        linear_type="int8_smoothquant_aiu",
+        use_smoothquant=True,
+    ),
+)
 register_linear_type_to_sharding_map("int8_aiu", shard_int8_aiu_linear)

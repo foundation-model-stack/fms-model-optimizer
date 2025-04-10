@@ -26,7 +26,8 @@ import transformers
 # fms_mo imports
 from fms_mo import qmodel_prep
 from fms_mo.prep import has_quantized_module
-from tests.models.test_model_utils import delete_config, qmodule_error
+from fms_mo.utils.utils import patch_torch_bmm
+from tests.models.test_model_utils import count_qmodules, delete_config, qmodule_error
 
 ################
 # Qmodel tests #
@@ -257,3 +258,63 @@ def test_bert_dynamo(
     delete_config()
     qmodel_prep(model_bert, input_bert, config_int8, use_dynamo=True)
     qmodule_error(model_bert, 1, 72)
+
+
+def test_bert_dynamo_wi_qbmm(
+    model_bert_eager: transformers.models.bert.modeling_bert.BertModel,
+    input_bert: torch.FloatTensor,
+    config_int8: dict,
+):
+    """
+    Perform int8 quantization on BERT w/ Dynamo tracer and QBmm modules. QBmms will be run in place
+    of torch.matmul/torch.bmm automatically, if everything is set up correctly. See the 3 checks
+    below for more details.
+    NOTE:
+        1. QBmm modules will be added after qmodel_prep(), see check 1.
+        2. The self-attention forward() will still call torch.matmul as written in the original
+            python code, i.e. if we check QLinear.num_called and QBmm.num_called, they will be 1 and
+            0, respectively, meaning QBmms were attached but not called.
+        3. By using patch_torch_bmm() context manager, QBmm modules will be triggered and those
+            torch.matmul (usually 2 per attn module) calls will be redirect to QBmm's forward.
+
+    Args:
+        model_bert (transformers.models.bert.modeling_bert.BertModel): BERT model + weights
+        input_bert (torch.FloatTensor): Tokenized input for BERT
+        config (dict): Recipe Config w/ int8 settings
+    """
+    delete_config()
+    config_int8["nbits_bmm1"] = 8
+    config_int8["nbits_bmm2"] = 8
+    qmodel_prep(model_bert_eager, input_bert, config_int8, use_dynamo=True)
+
+    # check 1: make sure QBmm are added, i.e. 72 QLinear + 24 QBmm
+    qmodule_error(model_bert_eager, 1, 96)
+
+    _, fms_qmodules = count_qmodules(model_bert_eager)
+    qbmms = []
+    other_qmodules = []
+    for n, m in fms_qmodules:
+        if "QBmm" in n:
+            qbmms.append(m)
+        else:
+            other_qmodules.append(m)
+
+    # check 2: model call without our "patch" context manager, will not reach QBmm
+    #           we have an auto check in place, but it will only log warning, unless this flag
+    #           qcfg["force_stop_if_qbmm_auto_check_failed"] = True
+    with torch.no_grad():
+        model_bert_eager(**input_bert)
+    assert all(
+        m.num_module_called == 0 for m in qbmms
+    ), "Some QBmm was called when they shouldn't be."
+
+    # check 3: model call with context manager, will reach QBmm
+    with torch.no_grad(), patch_torch_bmm(config_int8):
+        model_bert_eager(**input_bert)
+    assert all(
+        m.num_module_called == 1 for m in qbmms
+    ), "Some QBmm was not called properly."
+
+    assert all(
+        m.num_module_called == 2 for m in other_qmodules
+    ), "Modules other than QBmm were not called properly."

@@ -1079,7 +1079,7 @@ def input_bert():
         torch.FloatTensor: BERT sample input
     """
     text = "Replace me by any text you'd like."
-    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+    tokenizer = BertTokenizer.from_pretrained("google-bert/bert-base-uncased")
     return tokenizer(text, return_tensors="pt")
 
 
@@ -1091,4 +1091,17 @@ def model_bert():
     Returns:
         transformers.models.bert.modeling_bert.BertModel: BERT model
     """
-    return BertModel.from_pretrained("bert-base-uncased", torchscript=True)
+    return BertModel.from_pretrained("google-bert/bert-base-uncased", torchscript=True)
+
+
+@pytest.fixture(scope="function")
+def model_bert_eager():
+    """
+    Get a BERT model
+
+    Returns:
+        transformers.models.bert.modeling_bert.BertModel: BERT model
+    """
+    return BertModel.from_pretrained(
+        "google-bert/bert-base-uncased", torchscript=True, attn_implementation="eager"
+    )

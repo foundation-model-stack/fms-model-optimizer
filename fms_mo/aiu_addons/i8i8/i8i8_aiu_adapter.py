@@ -23,6 +23,7 @@ import torch
 
 def _int8_qparams_aiu(
     input_sd: Mapping[str, torch.Tensor],
+    **kwargs,  # pylint: disable=unused-argument
 ) -> Mapping[str, torch.Tensor]:
     new_sd = {}
     modules_seen = set()
@@ -36,7 +37,7 @@ def _int8_qparams_aiu(
 
             param_type = "w" if is_weight else "a"
             new_name = f"{module_name}.{param_type}_{name_split[-1]}"
-        elif "smoothq" in name:
+        elif "smoothq" in name and "smoothquant" not in name:
             new_name = name.replace("smoothq", "smoothquant")
 
         new_sd[new_name] = param
@@ -47,7 +48,7 @@ def _int8_qparams_aiu(
 
 def _add_defaults_and_concat(
     new_sd: MutableMapping[str, torch.Tensor],
-    modules_seen: set,
+    modules_seen: set[str],
 ) -> None:
     """
     Add default activation clip values, zero_shift, and smoothquant_scale (if not
@@ -94,30 +95,24 @@ def _add_defaults_and_concat(
                 sq_scale.to(torch.float32),
             )
         )
-    return
 
 
-# registration of new adapter steps for each architecture
-serialization.register_adapter_step("llama", "int8_qparams_aiu", _int8_qparams_aiu)
-serialization.register_adapter_step(
-    "gpt_bigcode", "int8_qparams_aiu", _int8_qparams_aiu
-)
-serialization.register_adapter_step("roberta", "int8_qparams_aiu", _int8_qparams_aiu)
-
-# registration of multi-step adapter for each architecture
-serialization.register_adapter(
+# registration of new adapter step and adapter for each architecture
+for arch in [
     "llama",
-    "fms_mo",
-    [
-        "hf_to_fms_names",
-        "hf_to_fms_rope",
-        "weight_fusion",
-        "int8_qparams_aiu",
-    ],
-)
-serialization.register_adapter(
-    "gpt_bigcode", "fms_mo", ["hf_to_fms_names", "weight_fusion", "int8_qparams_aiu"]
-)
-serialization.register_adapter(
-    "roberta", "fms_mo", ["hf_to_fms_names", "weight_fusion", "int8_qparams_aiu"]
-)
+    "gpt_bigcode",
+    "granite",
+    "roberta",
+    "roberta_question_answering",
+]:
+    serialization.register_adapter_step(arch, "int8_qparams_aiu", _int8_qparams_aiu)
+    if arch in ["llama", "granite"]:
+        steps_to_register = [
+            "hf_to_fms_names",
+            "hf_to_fms_rope",
+            "weight_fusion",
+            "int8_qparams_aiu",
+        ]
+    else:
+        steps_to_register = ["hf_to_fms_names", "weight_fusion", "int8_qparams_aiu"]
+    serialization.register_adapter(arch, "fms_mo", steps_to_register)

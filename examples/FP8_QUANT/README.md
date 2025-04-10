@@ -73,20 +73,18 @@ This end-to-end example utilizes the common set of interfaces provided by `fms_m
 
 ## Example Test Results
 - BF16 (not quantized) LLAMA3-8B model.
-    ``` bash
-        |    Tasks     |Version|Filter|n-shot|  Metric  |   |Value |   |Stderr|
-        |--------------|------:|------|-----:|----------|---|-----:|---|-----:|
-        |lambada_openai|      1|none  |     5|acc       |↑  |0.7120|±  |0.0287|
-        |              |       |none  |     5|perplexity|↓  |3.8683|±  |0.3716|
-    ```
+
+|    Tasks     |Version|Filter|n-shot|  Metric  |   |Value |   |Stderr|
+|--------------|------:|------|-----:|----------|---|-----:|---|-----:|
+|lambada_openai|      1|none  |     5|acc       |↑  |0.7120|±  |0.0287|
+|              |       |none  |     5|perplexity|↓  |3.8683|±  |0.3716|
 
 - FP8 quantized LLAMA3-8B model.
-    ``` bash
-        |    Tasks     |Version|Filter|n-shot|  Metric  |   |Value |   |Stderr|
-        |--------------|------:|------|-----:|----------|---|-----:|---|-----:|
-        |lambada_openai|      1|none  |     5|acc       |↑  |0.7160|±  |0.0286|
-        |              |       |none  |     5|perplexity|↓  |3.8915|±  |0.3727|
-    ```
+
+|    Tasks     |Version|Filter|n-shot|  Metric  |   |Value |   |Stderr|
+|--------------|------:|------|-----:|----------|---|-----:|---|-----:|
+|lambada_openai|      1|none  |     5|acc       |↑  |0.7160|±  |0.0286|
+|              |       |none  |     5|perplexity|↓  |3.8915|±  |0.3727|
 
 ## Code Walk-through
 

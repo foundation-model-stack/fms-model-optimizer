@@ -38,50 +38,35 @@ def config_quantize_smooth_layers(qcfg):
         "granite-20b-code",
         "granite-20b-code",
     ]
-    if any(model in qcfg["model"] for model in llama_architecture) or any(
-        model in qcfg["model_type"] for model in llama_architecture
+    if (
+        any(model in qcfg["model"] for model in llama_architecture)
+        or any(model in qcfg["model_type"] for model in llama_architecture)
+        and qcfg["qskip_large_mag_layers"]
     ):
         qcfg["qlayer_name_pattern"] = ["model.layers."]
         qcfg["scale_layers"] = ["k_proj", "v_proj", "gate_proj", "up_proj"]
-        qcfg["qskip_layer_name"] = []
-        if "2-7b" in qcfg["model"]:
-            if qcfg["qskip_large_mag_layers"]:
-                qcfg["qskip_layer_name"] = [
-                    f"model.layers.{i}.mlp.down_proj" for i in [1, 30]
+        large_mag_layers = {
+            "2-7b": [1, 30],
+            "2-70b": [2, 8, 79],
+            "3-8B": [1, 31],
+            "3-70B": [3, 78, 79],
+            "405B-Instruct": [5, 124, 125],
+        }
+        for llama_family, layers in large_mag_layers.items():
+            if llama_family in qcfg["model"]:
+                qcfg["qskip_layer_name"] += [
+                    f"model.layers.{i}.mlp.down_proj" for i in layers
                 ]
-        if "2-13b" in qcfg["model"]:
-            if qcfg["qskip_large_mag_layers"]:
-                qcfg["qskip_layer_name"] = [
-                    f"model.layers.{i}.mlp.down_proj" for i in [3, 37]
-                ]
-        if "2-70b" in qcfg["model"]:
-            if qcfg["qskip_large_mag_layers"]:
-                qcfg["qskip_layer_name"] = [
-                    f"model.layers.{i}.mlp.down_proj" for i in [2, 8, 79]
-                ]
-        if "3-8B" in qcfg["model"]:
-            if qcfg["qskip_large_mag_layers"]:
-                qcfg["qskip_layer_name"] = [
-                    f"model.layers.{i}.mlp.down_proj" for i in [1, 31]
-                ]
-        if "3-70B" in qcfg["model"]:
-            if qcfg["qskip_large_mag_layers"]:
-                qcfg["qskip_layer_name"] = [
-                    f"model.layers.{i}.mlp.down_proj" for i in [3, 78, 79]
-                ]
-        if "405B-Instruct" in qcfg["model"]:  # llama3.1
-            if qcfg["qskip_large_mag_layers"]:
-                qcfg["qskip_layer_name"] = [
-                    f"model.layers.{i}.mlp.down_proj" for i in [5, 124, 125]
-                ]
+            break
+
     elif "mixtral" in qcfg["model"]:
         qcfg["qlayer_name_pattern"] = (
             ["model.layers"] if qcfg["nbits_bmm1"] == 32 else []
         )
         qcfg["scale_layers"] = ["q_proj", "k_proj", "v_proj", "w1", "w3"]
-        qcfg["qskip_layer_name"] = []
-        for i in range(32):
-            qcfg["qskip_layer_name"].append(f"model.layers.{i}.block_sparse_moe.gate")
+        qcfg["qskip_layer_name"] += [
+            f"model.layers.{i}.block_sparse_moe.gate" for i in range(32)
+        ]
         if qcfg["qskip_large_mag_layers"]:
             qcfg["qskip_layer_name"] += [
                 f"model.layers.{i}.block_sparse_moe.experts.{j}.w2"
