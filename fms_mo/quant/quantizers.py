@@ -3932,25 +3932,25 @@ class UniformAffineQuantizer(nn.Module):
         else:
             if "max" in self.scale_method:
                 x_min = min(x.min().item(), 0)
-                x_max = max(x.max().item(), 0)
+                x_max = max(x.max().item(), 0)  # type: ignore[assignment]
                 if "scale" in self.scale_method:
                     x_min = x_min * (self.n_bits + 2) / 8
                     x_max = x_max * (self.n_bits + 2) / 8
 
-                x_absmax = max(abs(x_min), x_max)
+                x_absmax = max(abs(x_min), x_max)  # type: ignore [call-overload]
                 if self.sym:
                     x_min, x_max = -x_absmax if x_min < 0 else 0, x_absmax
 
                 delta = float(x_max - x_min) / (self.n_levels - 1)
                 if delta < 1e-8:
                     logger.info(f"Quantization range close to zero: [{x_min}, {x_max}]")
-                    delta = 1e-8
+                    delta = 1e-8  # type: ignore[assignment]
 
                 zero_point = round(-x_min / delta)
 
             elif self.scale_method == "mse":
                 x_max = x.max()
-                x_min = x.min()
+                x_min = x.min()  # type: ignore[assignment]
                 best_score = 1e10
                 for i in range(80):
                     new_max = x_max * (1.0 - (i * 0.01))
