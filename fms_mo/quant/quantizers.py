@@ -3945,13 +3945,13 @@ class UniformAffineQuantizer(nn.Module):
                 delta = float(x_max - x_min) / (self.n_levels - 1)
                 if delta < 1e-8:
                     logger.info(f"Quantization range close to zero: [{x_min}, {x_max}]")
-                    delta = 1e-8  # type: ignore[assignment]
+                    delta = 1e-8
 
                 zero_point = round(-x_min / delta)
 
             elif self.scale_method == "mse":
                 x_max = x.max()
-                x_min = x.min()  # type: ignore[assignment]
+                x_min = x.min()
                 best_score = 1e10
                 for i in range(80):
                     new_max = x_max * (1.0 - (i * 0.01))
@@ -5454,7 +5454,7 @@ def custom_fp8_quantizer(
     mantissa_bits: int = 3,
     use_subnormal: bool = False,
     scale_to_max: bool = False,
-) -> torch.Tensor:
+):
     """Convert tensor tensor to FP8 format, remanining in decimal form (no binary conversion)
     and using some clever manipulation to round each tensor values to the closest representable
     FP8 value.
