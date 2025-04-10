@@ -3907,8 +3907,8 @@ class UniformAffineQuantizer(nn.Module):
         return x_dequant
 
     def init_quantization_scale(self, x: torch.Tensor, channel_wise: bool = False):
-        delta, zero_point = 1.0, 0
-        # init seems unnecessary, but at least avoid None induced type chk err
+        # delta, zero_point = 1.0, 0
+        # init seems unnecessary, comment out to avoid None induced type chk err
         if channel_wise:
             x_clone = x.clone().detach()
             n_channels = x_clone.shape[0]
