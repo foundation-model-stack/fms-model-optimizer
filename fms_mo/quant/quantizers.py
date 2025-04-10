@@ -4586,7 +4586,7 @@ def transformers_prepare_input(
     if isinstance(data, Mapping):
         return type(data)(
             {k: transformers_prepare_input(v, dev=dev) for k, v in data.items()}
-        )
+        )  # type: ignore[call-arg]
     if isinstance(data, (tuple, list)):
         return type(data)(transformers_prepare_input(v, dev=dev) for v in data)
     if isinstance(data, torch.Tensor):
