@@ -23,6 +23,7 @@ AdaRoundSTE, AdaRoundQuantizerare are modified from BRECQ's repo: https://github
 """
 
 # pylint: disable=too-many-return-statements
+# mypy: disable-error-code="assignment"
 
 # Standard
 from collections.abc import Mapping
@@ -3932,7 +3933,7 @@ class UniformAffineQuantizer(nn.Module):
         else:
             if "max" in self.scale_method:
                 x_min = min(x.min().item(), 0)
-                x_max = max(x.max().item(), 0)  # type: ignore[assignment]
+                x_max = max(x.max().item(), 0)
                 if "scale" in self.scale_method:
                     x_min = x_min * (self.n_bits + 2) / 8
                     x_max = x_max * (self.n_bits + 2) / 8
