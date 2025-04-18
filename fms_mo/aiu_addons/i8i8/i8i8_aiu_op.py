@@ -17,10 +17,9 @@
 import logging
 
 # Third Party
+from packaging.version import Version
 import torch
 import torch.nn.functional as F
-
-logger = logging.getLogger(__name__)
 
 # pylint: disable=unused-argument
 # i8i8 op must be registered with specific I/O, even if not in use by the op function
@@ -28,6 +27,31 @@ logger = logging.getLogger(__name__)
 # pylint: disable=not-callable
 # torch.nn.functional.linear not recognized as callable
 # open issue in PyLint: https://github.com/pytorch/pytorch/issues/119482
+
+logger = logging.getLogger(__name__)
+torch_version = Version(torch.__version__.split("+", maxsplit=1)[0])
+
+
+def implement_op_decorator(pt_ver, op_namespace_id):
+    """Version-dependent decorator for custom op implementation."""
+
+    def decorator(func):
+        if pt_ver < Version("2.4"):
+            return torch.library.impl(op_namespace_id, "default")(func)
+        return torch.library.custom_op(op_namespace_id, mutates_args=())(func)
+
+    return decorator
+
+
+def register_op_decorator(pt_ver, op_namespace_id):
+    """Version-dependent decorator for custom op registration."""
+
+    def decorator(func):
+        if pt_ver < Version("2.4"):
+            return torch.library.impl_abstract(op_namespace_id)(func)
+        return torch.library.register_fake(op_namespace_id)(func)
+
+    return decorator
 
 
 def register_aiu_i8i8_op():
@@ -41,26 +65,26 @@ def register_aiu_i8i8_op():
     if hasattr(torch.ops, "fms_mo") and hasattr(torch.ops.fms_mo, "i8i8_aiu"):
         logger.warning("AIU op has already been registered")
         return
-
     op_namespace_id = "fms_mo::i8i8_aiu"
-    torch.library.define(
-        op_namespace_id,
-        "(Tensor x, Tensor weight, Tensor bias, Tensor qdata, "
-        "str weight_quant_type, str activ_quant_type, "
-        "bool smoothquant) "
-        "-> Tensor",
-    )
+    if torch_version < Version("2.4"):
+        torch.library.define(
+            op_namespace_id,
+            "(Tensor x, Tensor weight, Tensor bias, Tensor qdata, "
+            "str weight_quant_type, str activ_quant_type, "
+            "bool smoothquant) "
+            "-> Tensor",
+        )
 
-    @torch.library.impl(op_namespace_id, "default")
+    @implement_op_decorator(torch_version, op_namespace_id)
     def i8i8_aiu(
-        x,
-        weight,
-        bias,
-        qdata,
-        weight_quant_type,
-        activ_quant_type,
-        smoothquant,
-    ):
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor,
+        qdata: torch.Tensor,
+        weight_quant_type: str,
+        activ_quant_type: str,
+        smoothquant: bool,
+    ) -> torch.Tensor:
         """Implement addmm of X and W.
         Support various quantization options for weights and activations.
 
@@ -86,16 +110,8 @@ def register_aiu_i8i8_op():
 
         return F.linear(x_dq.to(dtype), w_dq.to(dtype), bias.to(dtype))
 
-    @torch.library.impl_abstract(op_namespace_id)
-    def i8i8_aiu_abstract(
-        x,
-        weight,
-        bias,
-        qdata,
-        weight_quant_type,
-        activ_quant_type,
-        smoothquant,
-    ):
+    @register_op_decorator(torch_version, op_namespace_id)
+    def _(x, weight, bias, qdata, weight_quant_type, activ_quant_type, smoothquant):
         """OP template of I/O sizes"""
 
         outshape = x.size()[:-1] + (weight.size(0),)
