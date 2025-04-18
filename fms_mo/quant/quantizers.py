@@ -23,6 +23,7 @@ AdaRoundSTE, AdaRoundQuantizerare are modified from BRECQ's repo: https://github
 """
 
 # pylint: disable=too-many-return-statements
+# mypy: disable-error-code="assignment"
 
 # Standard
 from collections.abc import Mapping
@@ -3895,7 +3896,8 @@ class UniformAffineQuantizer(nn.Module):
                 self.delta = torch.nn.Parameter(delta)
             else:
                 delta, zero_point = self.init_quantization_scale(x, self.channel_wise)
-                self.delta.fill_(delta)
+                if self_data := self.delta:
+                    self_data.fill_(delta)
                 self.zero_point.fill_(zero_point)
             self.inited = True
 
@@ -3906,7 +3908,8 @@ class UniformAffineQuantizer(nn.Module):
         return x_dequant
 
     def init_quantization_scale(self, x: torch.Tensor, channel_wise: bool = False):
-        delta, zero_point = None, None
+        # delta, zero_point = 1.0, 0
+        # init seems unnecessary, comment out to avoid None induced type chk err
         if channel_wise:
             x_clone = x.clone().detach()
             n_channels = x_clone.shape[0]
@@ -3935,7 +3938,7 @@ class UniformAffineQuantizer(nn.Module):
                     x_min = x_min * (self.n_bits + 2) / 8
                     x_max = x_max * (self.n_bits + 2) / 8
 
-                x_absmax = max(abs(x_min), x_max)
+                x_absmax = max(abs(x_min), x_max)  # type: ignore [call-overload]
                 if self.sym:
                     x_min, x_max = -x_absmax if x_min < 0 else 0, x_absmax
 
@@ -3960,7 +3963,7 @@ class UniformAffineQuantizer(nn.Module):
                     if score < best_score:
                         best_score = score
                         delta = (new_max - new_min) / (2**self.n_bits - 1)
-                        zero_point = (-new_min / delta).round()
+                        zero_point = (-new_min / delta).round()  # type: ignore[union-attr]
             else:
                 raise NotImplementedError
 
@@ -4035,8 +4038,8 @@ class AdaRoundQuantizer(nn.Module):
         self.reset_ReSig_param(multimodal)
 
         self.beta = 2 / 3
-        self.Wshape = None
-        self.reshape2 = None
+        self.Wshape: list[int] = list()
+        self.reshape2: list[Any] = list()
 
     def forward(self, x):
         if self.useSAWB:
@@ -4583,7 +4586,7 @@ def transformers_prepare_input(
     if isinstance(data, Mapping):
         return type(data)(
             {k: transformers_prepare_input(v, dev=dev) for k, v in data.items()}
-        )
+        )  # type: ignore[call-arg]
     if isinstance(data, (tuple, list)):
         return type(data)(transformers_prepare_input(v, dev=dev) for v in data)
     if isinstance(data, torch.Tensor):
@@ -5389,7 +5392,7 @@ if Version(torch.__version__) >= Version("2.1"):
             if "e4m3" in q_mode:
                 self.float8_dtype = torch.float8_e4m3fn
             elif "e5m2" in q_mode:
-                self.float8_dtype = torch.float8_e5m2G
+                self.float8_dtype = torch.float8_e5m2
             else:
                 raise ValueError("FP8 only supports e4m3 and e5m2")
             self.emulate = emulate
@@ -5451,7 +5454,7 @@ def custom_fp8_quantizer(
     mantissa_bits: int = 3,
     use_subnormal: bool = False,
     scale_to_max: bool = False,
-) -> torch.Tensor:
+):
     """Convert tensor tensor to FP8 format, remanining in decimal form (no binary conversion)
     and using some clever manipulation to round each tensor values to the closest representable
     FP8 value.

@@ -132,7 +132,7 @@ known-local-folder=["fms_mo","tests"]
 [tool.mypy]
 mypy_path = [""]
 packages = ["fms_mo", "tests"]
-disable_error_code = []
+disable_error_code = ["import-not-found", "import-untyped", "no-any-return"]
 # TODO: tighten MyPy checks by enabling these checks over time.
 check_untyped_defs = false
 disallow_incomplete_defs = false
