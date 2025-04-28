@@ -74,10 +74,10 @@ elif pt_ver >= Version("2.4"):
     # Third Party
     import torch.library as lib
 
-    reg_op = partial(lib.custom_op, mutates_args=())
+    reg_op = partial(lib.custom_op, mutates_args=())  # type: ignore[attr-defined]
     reg_op_func = lib.define  # NOTE this is func, not decorator
-    kernel_impl = lib.register_kernel
-    reg_fake = lib.register_fake
+    kernel_impl = lib.register_kernel  # type: ignore[attr-defined]
+    reg_fake = lib.register_fake  # type: ignore[attr-defined]
 
 else:
     raise RuntimeError("Custom Op registration only works for >PT2.1")

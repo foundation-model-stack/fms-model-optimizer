@@ -47,6 +47,10 @@ jobs:
             commands: |
               echo "::add-matcher::.github/workflows/matchers/pylint.json"
               tox -e lint
+          - name: "mypy"
+            commands: |
+              echo "::add-matcher::.github/workflows/matchers/mypy.json"
+              tox -e mypy
   
     steps:
       - name: "Harden Runner"

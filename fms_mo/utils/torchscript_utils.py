@@ -55,7 +55,8 @@ def parse_operation(op_str: str):
     operands = op_str[
         last_open_parenthesis_index + 1 : last_close_parenthesis_index
     ].split(",")
-    operands = [operand.strip() for operand in operands] if operands != [""] else None
+    # pylint: disable=line-too-long
+    operands = [operand.strip() for operand in operands] if operands != [""] else None  # type: ignore[assignment]
     return operator, operands
 
 
@@ -178,9 +179,14 @@ class Node:
                 )
             operator, operands = parse_operation(op_str)
             if "aten::_conv" in op_str:
-                self.ch_in = list(native_torchscript_node.inputs())[0].type().sizes()
-                # NOTE: Needed for finding shortcut convolutions later
-                self.ch_out = list(native_torchscript_node.outputs())[0].type().sizes()
+                if native_torchscript_node:
+                    self.ch_in = (
+                        list(native_torchscript_node.inputs())[0].type().sizes()
+                    )
+                    # NOTE: Needed for finding shortcut convolutions later
+                    self.ch_out = (
+                        list(native_torchscript_node.outputs())[0].type().sizes()
+                    )
         else:
             node_def = node_input_repr
             op_str, operator, operands = None, None, None
@@ -200,31 +206,34 @@ class Node:
             working_str = node_input_repr[start_index:end_index]
             start_index = end_index + 2
 
-            node_instance.name, node_instance.obj = working_str.split(" : ")
-            node_instance.name = node_instance.name.strip()
+            # pylint: disable=line-too-long
+            node_instance.name, node_instance.obj = working_str.split(" : ")  # type: ignore[attr-defined]
+            node_instance.name = node_instance.name.strip()  # type: ignore[attr-defined]
             if native_torchscript_outputs:
-                if node_instance.name not in native_torchscript_outputs:
+                # pylint: disable=line-too-long
+                if node_instance.name not in native_torchscript_outputs:  # type: ignore[attr-defined]
+                    # pylint: disable=line-too-long
                     logger.error(
-                        f"Node def {node_instance.name} not in nativeTSoutputs "
+                        f"Node def {node_instance.name} not in nativeTSoutputs "  # type: ignore[attr-defined]
                         f"{native_torchscript_outputs}"
                     )
-            node_instance.Op = op_str
+            node_instance.Op = op_str  # type: ignore[attr-defined]
             if node_def_in_one_line > 1:
-                node_instance.unpackIdx = node_index
+                node_instance.unpackIdx = node_index  # type: ignore[attr-defined]
             if line_number:
-                node_instance.lineno = line_number
-            node_instance.operator = operator
+                node_instance.lineno = line_number  # type: ignore[attr-defined]
+            node_instance.operator = operator  # type: ignore[attr-defined]
             # This is the name of parents, not the pointer to the parent nodes
-            node_instance.parents = operands
-            node_instance.parents_ptr = []
-            node_instance.scope = scope_repr
-            node_instance.modname = module_name
-            node_instance.children = []
-            node_instance.children_ptr = []
-            node_instance.TSparents = native_torchscript_parents
-            node_instance.TSoutputs = native_torchscript_outputs
+            node_instance.parents = operands  # type: ignore[attr-defined]
+            node_instance.parents_ptr = []  # type: ignore[attr-defined]
+            node_instance.scope = scope_repr  # type: ignore[attr-defined]
+            node_instance.modname = module_name  # type: ignore[attr-defined]
+            node_instance.children = []  # type: ignore[attr-defined]
+            node_instance.children_ptr = []  # type: ignore[attr-defined]
+            node_instance.TSparents = native_torchscript_parents  # type: ignore[attr-defined]
+            node_instance.TSoutputs = native_torchscript_outputs  # type: ignore[attr-defined]
             # graph.dictionary_of_nodes will keep a record of all the nodes
-            dictionary_of_nodes[node_instance.name] = node_instance
+            dictionary_of_nodes[node_instance.name] = node_instance  # type: ignore[attr-defined]
 
     def __repr__(self):
         return f"{self.name} "

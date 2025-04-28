@@ -2631,8 +2631,10 @@ def reset_bn(module: nn.BatchNorm2d):
     Function not currently used.
     """
     if module.track_running_stats:
-        module.running_mean.zero_()
-        module.running_var.fill_(1 - module.eps)
+        if running_mean := module.running_mean:
+            running_mean.zero_()
+        if running_var := module.running_var:
+            running_var.fill_(1 - module.eps)
         # we do not reset numer of tracked batches here
     if module.affine:
         nn.init.ones_(module.weight)
@@ -2651,7 +2653,7 @@ try:
     bn_affine = True  # FrozenBN doesn't have .affine property
 except:
     BNofInteret = (nn.BatchNorm2d, nn.BatchNorm1d)
-    AbsorbLayers = (nn.Conv2d, nn.Linear)
+    AbsorbLayers = (nn.Conv2d, nn.Linear)  # type: ignore[assignment]
 
 
 def search_fold_and_remove_bn(model, mod_folded):

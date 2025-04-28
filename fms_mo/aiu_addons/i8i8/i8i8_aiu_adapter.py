@@ -14,7 +14,7 @@
 """Implement FMS adapter for INT8xINT8 checkpoints"""
 
 # Standard
-from typing import Mapping
+from typing import Mapping, MutableMapping
 
 # Third Party
 from fms.utils import serialization
@@ -47,7 +47,7 @@ def _int8_qparams_aiu(
 
 
 def _add_defaults_and_concat(
-    new_sd: dict[str, torch.Tensor],
+    new_sd: MutableMapping[str, torch.Tensor],
     modules_seen: set[str],
 ) -> None:
     """
