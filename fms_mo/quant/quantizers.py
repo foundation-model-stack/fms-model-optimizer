@@ -40,6 +40,9 @@ import torch.fx
 import torch.nn as nn  # pylint: disable=consider-using-from-import
 import torch.nn.functional as F
 
+# Local
+from fms_mo.quant.rotation import RotQuantWrapper
+
 logger = logging.getLogger(__name__)
 
 
@@ -66,7 +69,15 @@ def get_activation_quantizer(
     - pact/pact+/pactsym
     - sawb/sawb+
     - max
+
+    If qa_mode has "rot_" prefix or "_rot" suffix, wrap it with RotQuantizer(), remember to set up
+    R_left, R_right tensors later.
     """
+
+    use_rot = False
+    if "rot_" in qa_mode or "_rot" in qa_mode:
+        use_rot = True
+        qa_mode.replace("rot_", "").replace("_rot", "")
 
     if not use_swcap:
         QPACTLUT = {
@@ -220,6 +231,9 @@ def get_activation_quantizer(
                 f"activation quantization mode {qa_mode} is incompatible with swcap"
             )
 
+    if use_rot:
+        act_quantizer = RotQuantWrapper(act_quantizer)
+
     return act_quantizer
 
 
@@ -245,7 +259,15 @@ def get_weight_quantizer(
     SWCAP quantizers:
     - sawb/sawb+
     - max
+    If qa_mode has "rot_" prefix or "_rot" suffix, wrap it with RotQuantizer(), remember to set up
+    R_left, R_right tensors later.
     """
+
+    use_rot = False
+    if "rot_" in qw_mode or "_rot" in qw_mode:
+        use_rot = True
+        qw_mode.replace("rot_", "").replace("_rot", "")
+
     weight_quantizer = None
     if not use_swcap:
         cggrad = "cgpact" in qw_mode
@@ -366,6 +388,9 @@ def get_weight_quantizer(
             raise ValueError(
                 f"activation quantized mode {qw_mode} is incompatible with swcap"
             )
+
+    if use_rot:
+        weight_quantizer = RotQuantWrapper(weight_quantizer)
 
     return weight_quantizer
 
