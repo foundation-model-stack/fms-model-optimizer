@@ -26,9 +26,9 @@ from torch.nn import Conv2d, Linear
 import torch
 
 # Local
-from fms_mo.modules.bmm import QBmm
-from fms_mo.modules.conv import DetQConv2d, QConv2d, QConv2dPTQ, QConv2dPTQv2
-from fms_mo.modules.linear import QLinear
+from fms_mo.modules.conv import isinstance_qconv2d
+from fms_mo.modules.linear import isinstance_qlinear
+from fms_mo.prep import quantized_modules
 from fms_mo.utils.qconfig_utils import serialize_config
 
 logger = logging.getLogger(__name__)
@@ -36,11 +36,6 @@ logger = logging.getLogger(__name__)
 ####################
 # Helper Functions #
 ####################
-
-qconv2d_nodes = (QConv2d, QConv2dPTQ, QConv2dPTQv2, DetQConv2d)
-qlinear_nodes = QLinear
-
-quantized_nodes = (QConv2d, QConv2dPTQ, QConv2dPTQv2, QLinear, DetQConv2d)
 
 
 def is_qconv2d(node: torch.nn.Module):
@@ -53,7 +48,7 @@ def is_qconv2d(node: torch.nn.Module):
     Returns:
         bool: If node is in qconv2d_nodes
     """
-    return isinstance(node, qconv2d_nodes)
+    return isinstance_qconv2d(node)
 
 
 def is_qlinear(node: torch.nn.Module):
@@ -66,7 +61,7 @@ def is_qlinear(node: torch.nn.Module):
     Returns:
         bool: If node is in qlinear_nodes
     """
-    return isinstance(node, qlinear_nodes)
+    return isinstance_qlinear(node)
 
 
 def is_quantized_layer(node: torch.nn.Module):
@@ -79,7 +74,7 @@ def is_quantized_layer(node: torch.nn.Module):
     Returns:
         bool: If node is in quantized_nodes
     """
-    return isinstance(node, quantized_nodes)
+    return isinstance(node, quantized_modules)
 
 
 #########################
@@ -100,7 +95,7 @@ def count_qmodules(model: torch.nn.Module):
     """
     torch_modules, fms_qmodules = [], []
     for n, m in model.named_modules():
-        if isinstance(m, (QConv2d, QLinear, QBmm)):
+        if is_quantized_layer(m):
             fms_qmodules.append((n, m))
         elif isinstance(m, (Conv2d, Linear)):
             torch_modules.append((n, m))

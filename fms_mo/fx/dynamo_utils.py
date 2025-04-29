@@ -1218,7 +1218,7 @@ def model_analyzer(
     # b) qbmm creation and attaching to model
     if qcfg.get("QBmm"):  # see Note 4
         # Local
-        from fms_mo.modules import QBmm
+        QBmm = qcfg["mapping"]["matmul_or_bmm"]
 
         qcfg["which2patch_contextmanager"] = qcfg["bmm_prep"][
             "which2patch_contextmanager"

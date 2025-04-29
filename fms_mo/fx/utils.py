@@ -172,10 +172,7 @@ def lower_qmodel_to_ext_kernels(
             QLinearExllamaV2,
         )
 
-    qclass_accepted = []
-    for map_dict in qcfg["mapping"].values():
-        qclass_accepted.append(map_dict["to"])
-        qclass_accepted.append(map_dict.get("otherwise", None))
+    # qclass_accepted = list( qcfg["mapping"].values() )
 
     mod2swap = {
         n: m
@@ -498,7 +495,6 @@ def model_size_Wb(mod, unit="MB", print_to_file=True, show_details=False):
             )
         ),
     )
-
     if show_details:
         logger_or_print(df_summary_weights.to_markdown())
 

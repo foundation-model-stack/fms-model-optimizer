@@ -16,6 +16,7 @@
 # Standard
 from pathlib import Path
 from typing import Any
+import argparse
 import json
 import logging
 import os
@@ -26,7 +27,8 @@ from torch import nn
 import torch
 
 # Local
-from fms_mo.modules import QLSTM, QConv2d, QConvTranspose2d, QLinear
+from fms_mo.modules import QLSTM, QBmm, QConv2d, QConvTranspose2d, QLinear
+from fms_mo.utils.import_utils import available_packages
 
 # import numpy as np # only used in experimental func
 
@@ -105,7 +107,7 @@ def config_defaults():
     return cfg_defaults
 
 
-def qconfig_init(recipe: str = None, args: Any = None):
+def qconfig_init(recipe: str = None, args: Any = None, use_mx: bool = False):
     """Three possible ways to create qcfg:
     1. create a default qcfg
     2. load from a json
@@ -152,17 +154,12 @@ def qconfig_init(recipe: str = None, args: Any = None):
     qcfg = {}
     # 1. create a dict with default values
     qcfg["mapping"] = {
-        nn.Conv2d: {"from": nn.Conv2d, "to": QConv2d, "otherwise": QConv2d},
-        nn.ConvTranspose2d: {
-            "from": nn.ConvTranspose2d,
-            "to": QConvTranspose2d,
-            "otherwise": QConvTranspose2d,
-        },
-        nn.Linear: {"from": nn.Linear, "to": QLinear, "otherwise": QLinear},
-        nn.LSTM: {"from": nn.LSTM, "to": QLSTM, "otherwise": QLSTM},
+        nn.Linear: QLinear,
+        nn.Conv2d: QConv2d,
+        nn.ConvTranspose2d: QConvTranspose2d,
+        nn.LSTM: QLSTM,
+        "matmul_or_bmm": QBmm,
     }
-    # TODO: This could be further simplified. e.g. mapping["from class"] = "to class"
-    #       "otherwise" is rarely used, and redundant "from" in the output dict
 
     qcfg["nbits_w"] = 32
     qcfg["nbits_a"] = 32
@@ -301,7 +298,210 @@ def qconfig_init(recipe: str = None, args: Any = None):
             " Default or values from json of the same key will be overwritten."
         )
 
+    # 4. Check if mapping must change for MX library
+    # For now, simply use qa_mode or qw_mode to trigger, e.g. "mx_fp4_e2m1" -> "fp4_e2m1"
+    # user may create qcfg without "mx_fpxxx" then manually changes qw_mode/qa_mode to "mx_fpxxx"
+    # => need to check again at the beginning of qmodel_prep(), i.e. in check_config()
+    set_mx_specs(qcfg, args, use_mx)
+
     return qcfg
+
+
+def set_mx_specs(
+    config: dict,
+    args: argparse.ArgumentParser = None,
+    use_mx: bool = False,
+):
+    """
+    Set mx_specs dict in quantized config to be used for MX quantization.
+    Will use fms_mo default values for variables when none are given.
+
+    Options available:
+    1. Pass job args to create mx_specs.  Must have --a_elem_format and --w_elem_format set.
+    2. Consume a premade mx_specs dict from quantized config if present.
+    3. Consume quantized config variables prefixed with "mx_".
+
+    Options 2 and 3 are mutually exclusive with preference for Option 2 if both are given.
+
+    Args:
+        config (dict): Quantization config dict
+        args (argparse.ArgumentParser, optional): Job arg parser. Defaults to None.
+        use_mx (bool): Create default mx_specs when qcfg or args aren't present.
+            Defaults to False.
+    """
+    mx_prefix = "mx_"
+
+    # MX lib defaults for these values are None, 0, nearest, max, or bool
+    fms_defaults = get_mx_specs_defaults()
+
+    # Already have a mx_specs saved in config
+    use_mx_specs_config = "mx_specs" in config
+
+    # Check for any "mx_" vars set in config
+    use_mx_config = any(key.startswith(mx_prefix) for key in config.keys())
+
+    # Check args for any mx_specs vars
+    use_mx_args = args is not None and any(
+        hasattr(args, key) for key, _ in fms_defaults.items()
+    )
+
+    # Lastly, check for BMM consistency to enable QBmmMX
+    fms_bmm_modes = [
+        config["bmm1_qm1_mode"].startswith(mx_prefix),
+        config["bmm1_qm2_mode"].startswith(mx_prefix),
+        config["bmm2_qm1_mode"].startswith(mx_prefix),
+        config["bmm2_qm2_mode"].startswith(mx_prefix),
+    ]
+    # If any mx bmm set, they all must be set for QBmmMX ; will be checked in check_config
+    use_fms_bmm_modes = all(fms_bmm_modes)
+
+    use_mx = (
+        use_mx
+        or use_mx_specs_config
+        or use_mx_config
+        or use_mx_args
+        or use_fms_bmm_modes
+    )
+
+    if use_mx:
+        # If "mapping" has been removed from qcfg -> chk_cfg is being called by save_config() at
+        #     the end of qmodel_prep() => don't need to update anything.
+        # NOTE: If "mx_" qa_/qw_mode was used through args, the "mx_" prefix would have been removed
+        #     already in chk_cfg() => "use_mx" flag will be False. Keep in mind that THE ONLY WAY TO
+        #     TRIGGER REFRESH of mx_specs AFTER qconfig_init() is to manually set qa_/qw_mode to
+        #     "mx_something"!
+
+        if available_packages["mx"]:
+            # Standard
+            from functools import partial
+
+            # Third Party
+            # pylint: disable = import-error
+            import mx
+
+            # Local
+            from fms_mo.modules.bmm import QBmmMX
+            from fms_mo.modules.linear import QLinearMX
+
+            # Create a MxSpecs object based on input args and overwrite w/ qcfg if provided
+            mx_specs = mx.get_mx_specs(args) if use_mx_args else mx.MxSpecs()
+
+            # Ensure fms defaults are set assuming job args haven't already changed them
+            for key, val in fms_defaults.items():
+                if mx_specs[key] in [None, 0, False, True, "nearest", "max"]:
+                    mx_specs[key] = val
+
+            # Use config["mx_specs"] settings
+            if use_mx_specs_config:
+                mx_specs.update(config["mx_specs"])
+
+            # Use qcfg mx equivalents
+            else:
+                # k_elem_format special case - in q_modes
+                if config["qw_mode"].startswith(mx_prefix):
+                    mx_specs["w_elem_format"] = config["qw_mode"].replace(mx_prefix, "")
+                if config["qa_mode"].startswith(mx_prefix):
+                    mx_specs["a_elem_format"] = config["qa_mode"].replace(mx_prefix, "")
+
+                for mx_var, _ in fms_defaults.items():
+                    fms_var = "mx_" + mx_var
+                    # Only update if its in config; default values already set
+                    if fms_var in config:
+                        mx_specs[mx_var] = config.get(fms_var)
+
+                # Only 1 variable that has "mx_" prefix from MX lib
+                mx_var = "mx_flush_fp32_subnorms"
+                if mx_var in config:
+                    mx_specs[mx_var] = config.get(mx_var)
+
+            # Many mx_spec vars are synched with other vars -- may have changed now
+            mx_specs = mx.finalize_mx_specs(mx_specs)
+
+            # Save finalized mx_spec to config
+            config["mx_specs"] = mx_specs.data
+
+            # Update mapping for torch.nn and matmul_or_bmm to MX variants
+            # QLinearMX will be used, but QBmmMX requires bmm specifically
+            config["mapping"][nn.Linear] = partial(
+                QLinearMX, mx_specs=config["mx_specs"]
+            )
+            # config["mapping"][nn.Conv2d] = partial(
+            #     QConv2dMX, mx_specs=config["mx_specs"]
+            # )
+            # config["mapping"][nn.ConvTranspose2d] = partial(
+            #     QConvTranspose2dMX, mx_specs=config["mx_specs"]
+            # )
+            if use_fms_bmm_modes:  # all bmm_modes are "mx_" prefixed
+                config["mapping"]["matmul_or_bmm"] = partial(
+                    QBmmMX, mx_specs=config["mx_specs"]
+                )
+
+        else:
+            logger.info("MX variables provided, but MX package is not installed")
+
+
+def is_nvcc_installed():
+    """
+    Check whether we can call on the NVIDIA CUDA Compiler from the OS level
+
+    Returns:
+        bool: If nvcc is found and callable at the OS level
+    """
+    # Standard
+    import subprocess
+
+    try:
+        # Run the nvcc command to check if it's installed
+        subprocess.check_output("nvcc --version", shell=True, stderr=subprocess.STDOUT)
+        logger.info("nvcc is installed and callable")
+        return True
+    except subprocess.CalledProcessError:
+        logger.info("nvcc is installed, but there was an issue running nvcc.")
+        return False
+    except FileNotFoundError:
+        logger.info("nvcc is not installed on the system.")
+        return False
+
+
+def get_mx_specs_defaults():
+    """
+    Get key,value pairs for mx_specs defaults for fms_mo
+
+    Returns:
+        dict: fms_mo defaults of mx_specs
+    """
+    return {
+        "w_elem_format": "fp8_e4m3",
+        "a_elem_format": "fp8_e4m3",
+        "w_elem_format_bp": "fp8_e4m3",
+        "a_elem_format_bp": "fp8_e4m3",
+        "a_elem_format_bp_ex": "fp8_e4m3",
+        "a_elem_format_bp_os": "fp8_e4m3",
+        "shared_exp_method": "max",
+        "scale_bits": 8,
+        "block_size": 32,
+        "bfloat": 16,
+        "fp": 16,
+        "round": "nearest",
+        "round_m": "nearest",
+        "round_weight": "nearest",
+        "round_output": "nearest",
+        "round_grad_weight": "nearest",
+        "round_grad_input": "nearest",
+        "round_mx_output": "nearest",
+        "round_mx_input_grad_input": "nearest",
+        "round_mx_weight_grad_input": "nearest",
+        "round_mx_grad_output_grad_input": "nearest",
+        "round_mx_input_grad_weight": "nearest",
+        "round_mx_grad_output_grad_weight": "nearest",
+        "quantize_backprop": True,
+        "bfloat_subnorms": True,
+        "mx_flush_fp32_subnorms": False,
+        "softmax_exp2": False,
+        "vec_use_exp2": False,
+        "vec_use_recip": False,
+        "custom_cuda": torch.cuda.is_available() and is_nvcc_installed(),
+    }
 
 
 def has_non_serializable_object(anything):
@@ -391,14 +591,10 @@ def get_unwanted_defaults():
         (
             "mapping",
             {
-                nn.Conv2d: {"from": nn.Conv2d, "to": QConv2d, "otherwise": QConv2d},
-                nn.ConvTranspose2d: {
-                    "from": nn.ConvTranspose2d,
-                    "to": QConvTranspose2d,
-                    "otherwise": QConvTranspose2d,
-                },
-                nn.Linear: {"from": nn.Linear, "to": QLinear, "otherwise": QLinear},
-                nn.LSTM: {"from": nn.LSTM, "to": QLSTM, "otherwise": QLSTM},
+                nn.Conv2d: QConv2d,
+                nn.ConvTranspose2d: QConvTranspose2d,
+                nn.Linear: QLinear,
+                nn.LSTM: QLSTM,
             },
         ),
         ("checkQerr_frequency", False),
@@ -661,30 +857,50 @@ def check_config(config, model_dtype=None):
         "bmm2_qm2_mode",
     ]
 
+    # mx related modes for config:
+    mx_spec_config_modes = [
+        "mx_fp8_e5m2",
+        "mx_fp8_e4m3",
+        "mx_fp4_e2m1",
+        "mx_fp4",
+        "mx_int8",
+        "mx_int4",
+        "mx_fp16",
+        "mx_float16",
+        "mx_bf16",
+        "mx_bfloat16",
+    ]
+
     # Check each for correct ranges
     for qa_mode_str in qa_modes_str:
         qa_mode = config.get(qa_mode_str, "pact+")
-        if not qa_mode in qa_mode_settings:
+        if not qa_mode in (qa_mode_settings + mx_spec_config_modes):
             raise ValueError(
                 f"{qa_mode_str} = {qa_mode} is not set to one of the following: "
-                f"{qa_mode_settings}"
+                f"{qa_mode_settings + mx_spec_config_modes}"
             )
 
     for qw_mode_str in qw_modes_str:
         qw_mode = config.get(qw_mode_str, "sawb+")
-        if not qw_mode in qw_mode_settings:
+        if not qw_mode in (qw_mode_settings + mx_spec_config_modes):
             raise ValueError(
                 f"{qw_mode_str} = {qw_mode} is not set to one of the following: "
-                f"{qw_mode_settings}"
+                f"{qw_mode_settings + mx_spec_config_modes}"
             )
 
+    bmm_mode_consistency = 0  # all or none when using mx
     for bmm_mode_str in bmm_modes_str:
         bmm_mode = config.get(bmm_mode_str, "pactsym+")
-        if not bmm_mode in bmm_mode_settings:
+        bmm_mode_consistency += bmm_mode.startswith("mx_")
+        # mx_specs doesn't have 4 individual bmmX_qmY_modes, it re-uses w and a fmt instead.
+        # We will keep them in qcfg (with "mx_" prefix NOT removed).
+        if not bmm_mode in (bmm_mode_settings + mx_spec_config_modes):
             raise ValueError(
                 f"{bmm_mode_str} = {bmm_mode} is not set to one of the following: "
-                f"{bmm_mode_settings}"
+                f"{bmm_mode_settings + mx_spec_config_modes}"
             )
+    if bmm_mode_consistency != 0 and bmm_mode_consistency != len(bmm_modes_str):
+        raise ValueError("bmmX_qmY_modes inconsistent! Should be all mx or no mx.")
 
     # Check mode calibration and initialization values
     calib_init_settings = ["percentile", "pact", "sawb", "max"]
@@ -718,7 +934,9 @@ def check_config(config, model_dtype=None):
         boolean_var = config.get(
             boolean_var_str, False
         )  # assume default = False is not specified
-        if not isinstance(boolean_var, bool):
+        # Note: bool is a subclass of int, so we can't rely on isinstance
+        # pylint: disable = unidiomatic-typecheck
+        if type(boolean_var) is not bool:
             raise ValueError(f"{boolean_var_str} = {boolean_var} is not a boolean")
 
     # Check int values
@@ -734,8 +952,8 @@ def check_config(config, model_dtype=None):
         integer_var = config.get(integer_var_str, integer_var_default)
         # Check if integer was given as float (1.0 when it should be 1)
         if isinstance(integer_var, float) and integer_var.is_integer():
-            config[integer_var] = int(integer_var)
-            fp_var = int(integer_var)
+            config[integer_var_str] = int(integer_var)
+            integer_var = int(integer_var)
         if not isinstance(integer_var, int):
             raise ValueError(f"{integer_var_str} = {integer_var} is not an integer")
 
@@ -840,3 +1058,142 @@ def check_config(config, model_dtype=None):
             f"which2patch_contextmanager = {which2patch_contextmanager} is not one of "
             f"the following: {which2patch_contextmanager_settings}"
         )
+
+    # Check MX-related variables in mx_specs
+    mx_specs = config.get("mx_specs", None)
+    if mx_specs:
+        # mx related modes for config:
+        mx_spec_modes = [
+            "fp8_e5m2",
+            "fp8_e4m3",
+            "fp4_e2m1",
+            "fp4",
+            "int8",
+            "int4",
+            "fp16",
+            "float16",
+            "bf16",
+            "bfloat16",
+        ]
+
+        mx_specs_format_var_strs = {
+            "w_elem_format",
+            "a_elem_format",
+            "w_elem_format_bp",
+            "a_elem_format_bp",
+            "a_elem_format_bp_ex",
+            "a_elem_format_bp_os",
+        }
+
+        for format_var_str in mx_specs_format_var_strs:
+            format_var = mx_specs[format_var_str]
+            if not isinstance(format_var, str):
+                raise ValueError(
+                    f"mx_specs[{format_var_str}] = {format_var} is not a string"
+                )
+            if format_var not in mx_spec_modes:
+                raise ValueError(
+                    f"mx_specs[{format_var_str}] = {format_var} is not in one of the following: "
+                    f"{mx_spec_modes}"
+                )
+
+        mx_spec_int_var_str_defaults = [
+            ("scale_bits", 8),
+            ("block_size", 32),
+            ("fp", 16),
+            ("bfloat", 16),
+        ]
+        mx_spec_int_var_values = {2, 4, 6, 8, 16, 32}
+
+        for integer_var_str, integer_var_default in mx_spec_int_var_str_defaults:
+            integer_var = mx_specs.get(integer_var_str, integer_var_default)
+            # Check if integer was given as float (1.0 when it should be 1)
+            if isinstance(integer_var, float) and integer_var.is_integer():
+                mx_specs[integer_var_str] = int(integer_var)
+                integer_var = int(integer_var)
+            if not isinstance(integer_var, int):
+                raise ValueError(
+                    f"mx_specs[{integer_var_str}] = {integer_var} is not an integer"
+                )
+            if integer_var not in mx_spec_int_var_values:
+                raise ValueError(
+                    f"mx_specs[{integer_var_str}] = {integer_var} must be an integer in "
+                    f"{mx_spec_int_var_values}"
+                )
+
+        mx_spec_bool_var_strs = {
+            "mx_flush_fp32_subnorms",
+            "bfloat_subnorms",
+            "quantize_backprop",
+            "softmax_exp2",
+            "vec_use_exp2",
+            "vec_use_recip",
+            "custom_cuda",
+        }
+        for boolean_var_str in mx_spec_bool_var_strs:
+            # assume default = False is not specified
+            boolean_var = mx_specs.get(boolean_var_str, False)
+            # Note: bool is a subclass of int, so we can't rely on isinstance
+            # pylint: disable = unidiomatic-typecheck
+            if type(boolean_var) is not bool:
+                raise ValueError(
+                    f"mx_specs[{boolean_var_str}] = {boolean_var} is not a boolean"
+                )
+
+        mx_spec_exp_var_strs = {
+            "shared_exp_method",
+        }
+        mx_spec_exp_var_values = {"max", None}
+        for exp_var_str in mx_spec_exp_var_strs:
+            exp_var = mx_specs.get(exp_var_str, "max")
+            if not isinstance(exp_var, str):
+                raise ValueError(f"mx_specs[{exp_var_str}] = {exp_var} is not a string")
+            if exp_var not in mx_spec_exp_var_values:
+                raise ValueError(
+                    f"mx_specs[{exp_var_str}] = {exp_var} is not in "
+                    f"{mx_spec_exp_var_values}"
+                )
+
+        mx_spec_round_var_strs = {
+            "round",
+            "round_m",
+            "round_weight",
+            "round_output",
+            "round_grad_weight",
+            "round_grad_input",
+            "round_mx_output",
+            "round_mx_input_grad_input",
+            "round_mx_weight_grad_input",
+            "round_mx_grad_output_grad_input",
+            "round_mx_input_grad_weight",
+            "round_mx_grad_output_grad_weight",
+        }
+        mx_spec_round_var_values = {"nearest", "floor"}
+        for round_var_str in mx_spec_round_var_strs:
+            round_var = mx_specs.get(round_var_str, "nearest")
+            if not isinstance(round_var, str):
+                raise ValueError(
+                    f"mx_specs[{round_var_str}] = {round_var} is not a string"
+                )
+            if round_var not in mx_spec_round_var_values:
+                raise ValueError(
+                    f"mx_specs[{round_var_str}] = {round_var} is not in"
+                    f"{mx_spec_round_var_values}"
+                )
+
+        # If mapping is defined, check for MX  classes
+        # Local
+        from fms_mo.modules.bmm import QBmmMX
+        from fms_mo.modules.linear import QLinearMX
+
+        mapping = config.get("mapping", None)
+
+        # partial was used to init this mapping --> use .func pointer
+        if mapping is not None:
+            if not mapping[nn.Linear].func is QLinearMX:
+                raise ValueError("MX mapping for nn.Linear is not QLinearMX")
+
+            if mapping["matmul_or_bmm"].func is QBmmMX:
+                raise ValueError("MX mapping for matmul_or_bmm is not QBmmMX")
+
+    # End mx_specs checks

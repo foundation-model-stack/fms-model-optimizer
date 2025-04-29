@@ -25,6 +25,7 @@ optional_packages = [
     "exllama_kernels",
     "exllamav2_kernels",
     "llmcompressor",
+    "mx",
     "matplotlib",
     "graphviz",
     "pygraphviz",

@@ -508,6 +508,7 @@ class QLSTM(nn.LSTM):
         return expr
 
 
+# KEEP THIS AT END OF FILE - classes must be declared
 QLSTM_modules = (QLSTM,)
 
 

@@ -1515,6 +1515,7 @@ class QConv2d_cutlass_i8i32_nt(nn.Conv2d):
         return output.to(input_dtype)
 
 
+# KEEP THIS AT END OF FILE - classes must be declared
 QConv2d_modules = (
     QConv2d,
     DetQConv2d,
