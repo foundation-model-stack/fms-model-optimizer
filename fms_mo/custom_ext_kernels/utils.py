@@ -14,7 +14,7 @@
 
 
 """This file contains external kernel registrations, compilation, and packing functions.
-Some functions may require additional packages, e.g. auto_gptq, cutlass (source clone)
+Some functions may require additional packages, e.g. gptqmodel, cutlass (source clone)
 """
 
 # pylint: disable=ungrouped-imports,unused-argument,c-extension-no-member
@@ -491,27 +491,29 @@ def cutlass_ops_load_and_reg(qcfg=None, run_unit_test=False):
 
 
 def exllama_ops_load_and_reg(qcfg=None, run_unit_test=False):
-    """Register Exllama kernels borrowed from auto-gptq
+    """Register Exllama kernels borrowed from gptqmodel
     Args:
         qcfg: dict. quant config
         run_unit_test: bool. Run unit tests after Op registration. (if unit tests defined.)
 
     NOTE:
-        1. need to install auto-gptq python package
+        1. need to install gptqmodel python package
         2. Op registration signature changed drastically from torch 2.1 - 2.4. TODO: add 2.4 support
 
-    see https://github.com/AutoGPTQ/AutoGPTQ for installation instruction
+    see https://github.com/ModelCloud/GPTQModel for installation instructions
     """
     if qcfg is None:
         qcfg = {}
     elif qcfg:
-        qcfg["AUTOGPTQ_AVAILABLE"] = False
+        qcfg["GPTQMODEL_AVAILABLE"] = False
 
-    namespace = "autogptq_gemm"
+    namespace = "gptqmodel_gemm"
     # check before compile
-    if hasattr(torch.ops, namespace) and hasattr(torch.ops.autogptq_gemm, "exv1_i4f16"):
-        logger.info("Custom AutoGPTQ functions have been loaded already!")
-        qcfg["AUTOGPTQ_AVAILABLE"] = True
+    if hasattr(torch.ops, namespace) and hasattr(
+        torch.ops.gptqmodel_gemm, "exv1_i4f16"
+    ):
+        logger.info("Custom GPTQModel functions have been loaded already!")
+        qcfg["GPTQMODEL_AVAILABLE"] = True
         need_registration = False
     else:
         need_registration = (
@@ -521,7 +523,7 @@ def exllama_ops_load_and_reg(qcfg=None, run_unit_test=False):
 
         if not need_registration:
             logger.warning(
-                "Please check the installation of AutoGPTQ package."
+                "Please check the installation of GPTQModel package."
                 "External kernels cannot be used this time."
             )
             return
@@ -623,10 +625,11 @@ def exllama_ops_load_and_reg(qcfg=None, run_unit_test=False):
             )
 
         logger.info(
-            f"New AutoGPTQ gemm functions have been loaded and registered to torch.ops.{namespace}."
+            f"New GPTQModel gemm functions have been loaded and registered to \
+            torch.ops.{namespace}."
         )
         if qcfg:
-            qcfg["AUTOGPTQ_AVAILABLE"] = True
+            qcfg["GPTQMODEL_AVAILABLE"] = True
 
     if run_unit_test:
         return NotImplemented
@@ -1110,10 +1113,14 @@ def swap_nnlinear_to_quantlinear(model, qconfig, prefix=None, qlinear2use=None):
         QuantLinear = qlinear2use
     elif exVer == 1:
         # Third Party
-        from auto_gptq.nn_modules.qlinear.qlinear_exllama import QuantLinear
+        from gptqmodel.nn_modules.qlinear.exllama import (
+            ExllamaQuantLinear as QuantLinear,
+        )
     else:
         # Third Party
-        from auto_gptq.nn_modules.qlinear.qlinear_exllamav2 import QuantLinear
+        from gptqmodel.nn_modules.qlinear.exllamav2 import (
+            ExllamaV2QuantLinear as QuantLinear,
+        )
 
     num_swapped = 0
     for n, m in model.named_modules():

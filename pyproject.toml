@@ -44,7 +44,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pre-commit>=3.0.4,<5.0"]
 fp8 = ["llmcompressor"]
-gptq = ["auto_gptq>0.4.2", "optimum>=1.15.0"]
+gptq = ["Cython", "gptqmodel>=1.7.3"]
 visualize = ["matplotlib", "graphviz", "pygraphviz"]
 flash-attn = ["flash-attn>=2.5.3,<3.0"]
 opt = ["fms-model-optimizer[fp8, gptq]"]

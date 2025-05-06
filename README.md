@@ -42,7 +42,7 @@ FMS Model Optimizer is a framework for developing reduced precision neural netwo
 *Optional packages based on optimization functionality required:*
 
 - **GPTQ** is a popular compression method for LLMs: 
-    - [auto_gptq](https://pypi.org/project/auto-gptq/) or build from [source](https://github.com/AutoGPTQ/AutoGPTQ)
+    - [gptqmodel](https://pypi.org/project/gptqmodel/) or build from [source](https://github.com/ModelCloud/GPTQModel)
 - If you want to experiment with **INT8** deployment in [QAT](./examples/QAT_INT8/) and [PTQ](./examples/PTQ_INT8/) examples:
     - Nvidia GPU with compute capability > 8.0 (A100 family or higher)
     - Option 1:

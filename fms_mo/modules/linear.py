@@ -1466,14 +1466,14 @@ class QLinearCutlassI8I32NT(QLinearCublasI8I32NT):
 
 try:
     # Third Party
-    from auto_gptq.nn_modules.qlinear.qlinear_exllama import (
-        QuantLinear as QLinearExllamaV1,
-    )
-    from auto_gptq.nn_modules.qlinear.qlinear_exllamav2 import (
-        QuantLinear as QLinearExllamaV2,
-    )
-    from auto_gptq.nn_modules.qlinear.qlinear_exllamav2 import ext_gemm_half_q_half
     from exllama_kernels import prepare_buffers, set_tuning_params
+    from gptqmodel.nn_modules.qlinear.exllama import (
+        ExllamaQuantLinear as QLinearExllamaV1,
+    )
+    from gptqmodel.nn_modules.qlinear.exllamav2 import (
+        ExllamaV2QuantLinear as QLinearExllamaV2,
+    )
+    from gptqmodel.nn_modules.qlinear.exllamav2 import ext_gemm_half_q_half
     from transformers.pytorch_utils import Conv1D
 
     class QLinearExv1WI4AF16(QLinearExllamaV1):
@@ -1579,7 +1579,7 @@ try:
                 Tensor: Output tensor of shape (batch_size, out_features).
             """
             with torch.no_grad():
-                x = torch.ops.autogptq_gemm.exv1_i4f16(x.half(), self.q4, self.width)
+                x = torch.ops.gptqmodel_gemm.exv1_i4f16(x.half(), self.q4, self.width)
 
             if self.bias is not None:
                 x.add_(self.bias)
@@ -1729,7 +1729,7 @@ try:
             if kwargs.get(
                 "useInductor", False
             ):  # anything other than False or None will use torch wrapped version
-                qlinear_ex.extOp = torch.ops.autogptq_gemm.exv2_i4f16
+                qlinear_ex.extOp = torch.ops.gptqmodel_gemm.exv2_i4f16
             else:
                 qlinear_ex.extOp = ext_gemm_half_q_half
 
@@ -1765,7 +1765,7 @@ try:
 
 except ModuleNotFoundError:
     logger.warning(
-        "AutoGPTQ is not properly installed. "
+        "GPTQModel is not properly installed. "
         "QLinearExv1WI4AF16 and QLinearExv2WI4AF16 wrappers will not be available."
     )
 

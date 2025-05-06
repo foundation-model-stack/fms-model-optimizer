@@ -177,7 +177,7 @@ class FMSMOArguments(TypeChecker):
 
 @dataclass
 class GPTQArguments(TypeChecker):
-    """Dataclass for GPTQ related arguments that will be used by auto-gptq."""
+    """Dataclass for GPTQ related arguments that will be used by gptqmodel."""
 
     bits: int = field(default=4, metadata={"choices": [2, 3, 4, 8]})
     group_size: int = field(default=-1)

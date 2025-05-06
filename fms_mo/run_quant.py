@@ -86,11 +86,11 @@ def quantize(
     logger.info(f"{fms_mo_args}\n{opt_args.quant_method}\n")
 
     if opt_args.quant_method == "gptq":
-        if not available_packages["auto_gptq"]:
+        if not available_packages["gptqmodel"]:
             raise ImportError(
                 "Quantization method has been selected as gptq but unable to use external library, "
-                "auto_gptq module not found. For more instructions on installing the appropriate "
-                "package, see https://github.com/AutoGPTQ/AutoGPTQ?tab=readme-ov-file#installation"
+                "gptqmodel module not found. For more instructions on installing the appropriate "
+                "package, see https://github.com/ModelCloud/GPTQModel"
             )
         gptq_args.use_triton = gptq_args.use_triton and available_packages["triton"]
         run_gptq(model_args, data_args, opt_args, gptq_args)
@@ -100,7 +100,7 @@ def quantize(
                 "Quantization method has been selected as fp8 but unable to use external library, "
                 "llmcompressor module not found. \n"
                 "For more instructions on installing the appropriate package, see "
-                "https://github.com/vllm-project/llm-compressor/tree/"
+                "https://github.com/vllm-project/llm-compressor"
                 "main?tab=readme-ov-file#installation"
             )
         run_fp8(model_args, data_args, opt_args, fp8_args)
@@ -126,28 +126,29 @@ def run_gptq(model_args, data_args, opt_args, gptq_args):
     """
 
     # Third Party
-    from auto_gptq import AutoGPTQForCausalLM, BaseQuantizeConfig
-    from auto_gptq.modeling._const import SUPPORTED_MODELS
-    from auto_gptq.modeling.auto import GPTQ_CAUSAL_LM_MODEL_MAP
+    from gptqmodel import GPTQModel, QuantizeConfig
+    from gptqmodel.models._const import SUPPORTED_MODELS
+    from gptqmodel.models.auto import MODEL_MAP
+    from gptqmodel.utils.backend import BACKEND
 
     # Local
     from fms_mo.utils.custom_gptq_models import custom_gptq_classes
 
     logger = set_log_level(opt_args.log_level, "fms_mo.run_gptq")
 
-    quantize_config = BaseQuantizeConfig(
+    quantize_config = QuantizeConfig(
         bits=gptq_args.bits,
         group_size=gptq_args.group_size,
         desc_act=gptq_args.desc_act,
         damp_percent=gptq_args.damp_percent,
     )
 
-    # Add custom model_type mapping to auto_gptq LUT so AutoGPTQForCausalLM can recognize them.
+    # Add custom model_type mapping to gptqmodel LUT so GPTQModel can recognize them.
     for mtype, cls in custom_gptq_classes.items():
         SUPPORTED_MODELS.append(mtype)
-        GPTQ_CAUSAL_LM_MODEL_MAP[mtype] = cls
+        MODEL_MAP[mtype] = cls
 
-    model = AutoGPTQForCausalLM.from_pretrained(
+    model = GPTQModel.from_pretrained(
         model_args.model_name_or_path,
         quantize_config=quantize_config,
         torch_dtype=model_args.torch_dtype,
@@ -166,9 +167,9 @@ def run_gptq(model_args, data_args, opt_args, gptq_args):
     start_time = time.time()
     model.quantize(
         data,
-        use_triton=gptq_args.use_triton,
+        backend=BACKEND.TRITON if gptq_args.use_triton else BACKEND.AUTO,
         batch_size=gptq_args.batch_size,
-        cache_examples_on_gpu=gptq_args.cache_examples_on_gpu,
+        calibration_enable_gpu_cache=gptq_args.cache_examples_on_gpu,
     )
 
     logger.info(
@@ -176,7 +177,7 @@ def run_gptq(model_args, data_args, opt_args, gptq_args):
     )
 
     logger.info(f"Saving quantized model and tokenizer to {opt_args.output_dir}")
-    model.save_quantized(opt_args.output_dir, use_safetensors=True)
+    model.save_quantized(opt_args.output_dir)
     tokenizer.save_pretrained(opt_args.output_dir)
 
 

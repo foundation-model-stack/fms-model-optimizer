@@ -63,7 +63,7 @@ ignore-patterns=^\.#
 # (useful for modules/projects where namespaces are manipulated during runtime
 # and thus existing member attributes cannot be deduced by static analysis). It
 # supports qualified module names, as well as Unix pattern matching.
-ignored-modules=auto_gptq,                
+ignored-modules=gptqmodel,                
                 exllama_kernels,
                 exllamav2_kernels,
                 llmcompressor,

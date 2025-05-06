@@ -21,7 +21,7 @@ from transformers.utils.import_utils import _is_package_available
 import torch
 
 optional_packages = [
-    "auto_gptq",
+    "gptqmodel",
     "exllama_kernels",
     "exllamav2_kernels",
     "llmcompressor",

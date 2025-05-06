@@ -82,7 +82,7 @@ FMS Model Optimizer supports FP8 in two ways:
 
 ### GPTQ (weight-only compression, or sometimes referred to as W4A16)
 
-For generative LLMs, very often the bottleneck of inference is no longer the computation itself but the data transfer. In such case, all we need is an efficient compression method to reduce the model size in memory, together with an efficient GPU kernel that can bring in the compressed data and only decompress it at GPU cache-level right before performing an FP16 computation. This approach is very powerful because it could reduce the number of GPUs for serving the model by 4X without sacrificing inference speed. (Some constraints may apply, such as batch size cannot exceed a certain number.) FMS Model Optimizer supports this method simply by utilizing `auto_gptq` package. See this [example](../examples/GPTQ/)
+For generative LLMs, very often the bottleneck of inference is no longer the computation itself but the data transfer. In such case, all we need is an efficient compression method to reduce the model size in memory, together with an efficient GPU kernel that can bring in the compressed data and only decompress it at GPU cache-level right before performing an FP16 computation. This approach is very powerful because it could reduce the number of GPUs for serving the model by 4X without sacrificing inference speed. (Some constraints may apply, such as batch size cannot exceed a certain number.) FMS Model Optimizer supports this method simply by utilizing `gptqmodel` package. See this [example](../examples/GPTQ/)
 
 
 ## Specification

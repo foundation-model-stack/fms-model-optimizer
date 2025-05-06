@@ -41,9 +41,9 @@ try:
     # Local
     from fms_mo.modules.linear import QLinearExv1WI4AF16, QLinearExv2WI4AF16
 
-    autogptq_available = True
+    gptqmodel_available = True
 except ImportError:
-    autogptq_available = False
+    gptqmodel_available = False
 
 
 MIN_BLOCK_SIZE = 5
@@ -91,7 +91,7 @@ def check_qclass_fallback_based_on_min_feat(
     ]
     if cutlass_available:
         qclass_has_constraints += [QLinearCutlassI8I32NT]
-    if autogptq_available:
+    if gptqmodel_available:
         qclass_has_constraints += [QLinearExv1WI4AF16, QLinearExv2WI4AF16]
 
     qclass = type(ref_module)
@@ -129,7 +129,7 @@ def lower_qmodel_to_ext_kernels(
     1. user need to define a mapping thru    qcfg["ext_kernel_mapping_mod"]
     2. to make it simple, only swap user specified qclass, nothing else
     3. move the module to GPU before swapping to accelerate scale/zp calculations
-    4. autogptq_post_init() must be done at model level, or OOM and incorrect results easily
+    4. gptq_post_init() must be done at model level, or OOM and incorrect results easily
 
     Args:
         mod (torch.nn.Module): model to be 'lowered'
@@ -156,7 +156,7 @@ def lower_qmodel_to_ext_kernels(
     qclass_must_start_from_cpu = None
     using_gptq = False
     if (
-        available_packages["auto_gptq"]
+        available_packages["gptqmodel"]
         and available_packages["exllama_kernels"]
         and available_packages["exllamav2_kernels"]
     ):
@@ -212,9 +212,9 @@ def lower_qmodel_to_ext_kernels(
 
     if using_gptq:
         # Third Party
-        from auto_gptq.modeling._utils import autogptq_post_init
+        from gptqmodel.utils.model import hf_gptqmodel_post_init as gptq_post_init
 
-        mod_tmp = autogptq_post_init(mod_tmp, use_act_order=False)  # see Note 4
+        mod_tmp = gptq_post_init(mod_tmp, use_act_order=False)  # see Note 4
 
     mod.to(currDev)
     logger.info(mod)
