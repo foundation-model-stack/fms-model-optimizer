@@ -24,7 +24,15 @@ import os
 # Third Party
 from torchvision.io import read_image
 from torchvision.models import ResNet50_Weights, ViT_B_16_Weights, resnet50, vit_b_16
-from transformers import BertModel, BertTokenizer
+from transformers import (
+    BertConfig,
+    BertModel,
+    BertTokenizer,
+    LlamaConfig,
+    LlamaModel,
+    GraniteConfig,
+    GraniteModel,
+)
 import pytest
 import torch
 
@@ -1135,3 +1143,130 @@ def model_bert_eager():
     return BertModel.from_pretrained(
         "google-bert/bert-base-uncased", torchscript=True, attn_implementation="eager"
     )
+
+
+#############################
+# Tiny BERT Model Fixtures #
+#############################
+
+tiny_bert_config_params = [
+    BertConfig(
+        vocab_size=512, # 30522
+        hidden_size=128, # 768
+        num_hidden_layers=2, # 12
+        num_attention_heads=2,# 12
+        intermediate_size=512, # 3072
+        max_position_embeddings=512, # 512
+        type_vocab_size=1, # 2
+    ),
+]
+
+
+@pytest.fixture(scope="session", params=tiny_bert_config_params)
+def config_tiny_bert(request):
+    """
+    Get a tiny Bert config
+
+    Returns:
+        BertConfig: Trimmed Tiny Bert config
+    """
+    return request.param
+
+
+@pytest.fixture(scope="function")
+def model_tiny_bert(config_tiny_bert):
+    """
+    Get a tiny Llama Model based on the config
+
+    Args:
+        config_tiny_bert (BertConfig): Trimmed Tiny Bert config
+
+    Returns:
+        BertConfig: Tiny Bert model
+    """
+    model = deepcopy(BertModel(config_tiny_bert))
+    return model
+
+
+#############################
+# Tiny Llama Model Fixtures #
+#############################
+
+tiny_llama_config_params = [
+    LlamaConfig(
+        vocab_size=1024, # 32000
+        hidden_size=128, # 4096
+        intermediate_size=256, # 11008
+        num_hidden_layers=2, # 32
+        num_attention_heads=2,# 32
+        max_position_embeddings=256, # 2048
+    ),
+]
+
+
+@pytest.fixture(scope="session", params=tiny_llama_config_params)
+def config_tiny_llama(request):
+    """
+    Get a tiny Llama config
+
+    Returns:
+        LlamaConfig: Trimmed Tiny Llama config
+    """
+    return request.param
+
+
+@pytest.fixture(scope="function")
+def model_tiny_llama(config_tiny_llama):
+    """
+    Get a tiny Llama Model based on the config
+
+    Args:
+        config_tiny_llama (LlamaConfig): Trimmed Tiny Llama config
+
+    Returns:
+        LlamaModel: Tiny Llama model
+    """
+    model = deepcopy(LlamaModel(config_tiny_llama))
+    return model
+
+
+###############################
+# Tiny Granite Model Fixtures #
+###############################
+
+tiny_granite_config_params = [
+    GraniteConfig(
+        vocab_size=1024, # 32000
+        hidden_size=128, # 4096
+        intermediate_size=256, # 11008
+        num_hidden_layers=2, # 32
+        num_attention_heads=2,# 32
+        max_position_embeddings=256, # 2048
+    ),
+]
+
+
+@pytest.fixture(scope="session", params=tiny_granite_config_params)
+def config_tiny_granite(request):
+    """
+    Get a tiny Granite config
+
+    Returns:
+        GraniteConfig: Tiny Granite config
+    """
+    return request.param
+
+
+@pytest.fixture(scope="function")
+def model_tiny_granite(config_tiny_granite):
+    """
+    Get a tiny Granite Model based on the config
+
+    Args:
+        config_tiny_granite (GraniteConfig): Trimmed Tiny Granite config
+
+    Returns:
+        GraniteModel: Tiny Granite model
+    """
+    model = deepcopy(GraniteModel(config_tiny_granite))
+    return model
