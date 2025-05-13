@@ -14,8 +14,8 @@ htmlcov/
 durations/*
 coverage*.xml
 qcfg.json
-models
 configs
+pytest.out
 
 # IDEs
 .vscode/
