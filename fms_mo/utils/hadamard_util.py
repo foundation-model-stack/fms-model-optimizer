@@ -21,10 +21,20 @@ Change original "text tensor implementation" into binaries for better efficiency
 sizes available in the safetensors file. [12, 20, 28, 36, 40, 44, 52, 60, 108, 140, 156, 172]
 """
 
+# Standard
+from pathlib import Path
+
 # Third Party
-from fast_hadamard_transform import hadamard_transform
+from fast_hadamard_transform import hadamard_transform  # pylint: disable=import-error
 from safetensors import safe_open
 import torch
+
+# TODO make sure it's a persistent cache so we don't need to load from file everytime
+cwd = Path(__file__).parent
+hadKs = {}
+with safe_open(cwd / "hadk.safetensors", framework="pt", device="cuda") as f:
+    for K_str in f.keys():  # K is a str
+        hadKs[K_str] = f.get_tensor(K_str)
 
 
 class HadamardTransform(torch.autograd.Function):
@@ -32,11 +42,11 @@ class HadamardTransform(torch.autograd.Function):
 
     # TODO seems redundant, insdie hadamard_transform(), backward is already handled...?
     @staticmethod
-    def forward(ctx, u):
+    def forward(_ctx, u):
         return hadamard_transform(u)
 
     @staticmethod
-    def backward(ctx, grad):
+    def backward(_ctx, grad):
         return hadamard_transform(grad)
 
 
@@ -44,15 +54,9 @@ def get_hadK(n, transpose=False):
     """Simplify the implementation and use binary tensors instead of text implementation."""
     for K in [172, 156, 140, 108, 60, 52, 44, 40, 36, 28, 20, 12]:
         if n % K == 0 and is_pow2(n // K):
-            with safe_open("hadk.safetensors", framework="pt") as f:
-                assert (
-                    str(K) in f.keys()
-                ), f"Special size Hadamard {K} does not exist in the file."
-                hadK = f.get_tensor(str(K))
-
+            hadK = hadKs[str(K)]
             if transpose:
                 hadK = hadK.T
-
             break
 
     if hadK is None:
@@ -67,35 +71,39 @@ def get_hadK(n, transpose=False):
 
 
 def matmul_hadU(X, transpose=False):
+    """Borrowed from SpinQuant."""
     n = X.shape[-1]
     hadK, K = get_hadK(n, transpose)
-    input = X.clone().view(-1, n, 1)
-    output = input.clone()
-    while input.shape[1] > K:
-        input = input.view(input.shape[0], input.shape[1] // 2, 2, input.shape[2])
-        output = output.view(input.shape)
-        output[:, :, 0, :] = input[:, :, 0, :] + input[:, :, 1, :]
-        output[:, :, 1, :] = input[:, :, 0, :] - input[:, :, 1, :]
-        output = output.view(input.shape[0], input.shape[1], -1)
-        (input, output) = (output, input)
+    input_ = X.clone().view(-1, n, 1)
+    output = input_.clone()
+    while input_.shape[1] > K:
+        input_ = input_.view(input_.shape[0], input_.shape[1] // 2, 2, input_.shape[2])
+        output = output.view(input_.shape)
+        output[:, :, 0, :] = input_[:, :, 0, :] + input_[:, :, 1, :]
+        output[:, :, 1, :] = input_[:, :, 0, :] - input_[:, :, 1, :]
+        output = output.view(input_.shape[0], input_.shape[1], -1)
+        (input_, output) = (output, input_)
     del output
 
     if K > 1:
         # Do not explicitly repeat - OOM
-        # input = torch.bmm(
-        #     hadK.repeat(len(input), 1, 1).to(input.device).to(input.dtype), input)
+        # input_ = torch.bmm(
+        #     hadK.repeat(len(input_), 1, 1).to(input_.device).to(input_.dtype), input_)
         # Use bcast instead
-        input = hadK.view(1, K, K).to(input) @ input
+        input_ = hadK.view(1, K, K).to(input_) @ input_
 
-    return input.view(X.shape) / torch.tensor(n).sqrt()
+    return input_.view(X.shape) / torch.tensor(n).sqrt()
 
 
 def matmul_hadUt(X):
+    """Borrowed from SpinQuant."""
     return matmul_hadU(X, transpose=True)
 
 
 def random_hadamard_matrix(size, device):
-    # See https://cornell-relaxml.github.io/quip-sharp/ , Section "Randomized Hadamard Transformation"
+    """Borrowed from SpinQuant."""
+    # See https://cornell-relaxml.github.io/quip-sharp/
+    # Section "Randomized Hadamard Transformation"
     Q = torch.randint(low=0, high=2, size=(size,)).to(torch.float64)
     Q = Q * 2 - 1
     Q = torch.diag(Q)
@@ -103,28 +111,31 @@ def random_hadamard_matrix(size, device):
 
 
 def hadamard_matrix(size, device):
-    # See https://cornell-relaxml.github.io/quip-sharp/ , Section "Randomized Hadamard Transformation"
+    """Borrowed from SpinQuant."""
     Q = torch.eye(size)
     return matmul_hadU(Q).to(device)
 
 
 def matmul_hadU_cuda(X, hadK, K):
+    """Borrowed from SpinQuant."""
     n = X.shape[-1]
     if K == 1:
         return HadamardTransform.apply(X.contiguous()) / torch.tensor(n).sqrt()
     # if transpose:
     #     hadK = hadK.T.contiguous()
-    input = X.view(-1, K, n // K)
-    input = HadamardTransform.apply(input.contiguous()) / torch.tensor(n).sqrt()
-    input = hadK.to(input.device).to(input.dtype) @ input
-    return input.reshape(X.shape)
+    input_ = X.view(-1, K, n // K)
+    input_ = HadamardTransform.apply(input_.contiguous()) / torch.tensor(n).sqrt()
+    input_ = hadK.to(input_.device).to(input_.dtype) @ input_
+    return input_.reshape(X.shape)
 
 
-def matmul_hadUt_cuda(X, hadK, K):
-    return matmul_hadU_cuda(X, hadK, K, transpose=True)
+# def matmul_hadUt_cuda(X, hadK, K):
+#     """Borrowed from SpinQuant."""
+#     return matmul_hadU_cuda(X, hadK, K, transpose=True)
 
 
 def apply_exact_had_to_linear(module, had_dim=-1, output=False, R2=None):
+    """Borrowed from SpinQuant."""
     assert isinstance(module, torch.nn.Linear)
     in_features, out_features = module.in_features, module.out_features
 
@@ -163,6 +174,7 @@ def apply_exact_had_to_linear(module, had_dim=-1, output=False, R2=None):
 
 
 def is_pow2(n):
+    """Borrowed from SpinQuant."""
     return (n & (n - 1) == 0) and (n > 0)
 
 

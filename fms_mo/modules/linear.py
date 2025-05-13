@@ -36,6 +36,7 @@ from fms_mo.quant.quantizers import (
     get_weight_quantizer,
     mask_fc_kij,
 )
+from fms_mo.quant.rotation import RotQuantWrapper
 from fms_mo.utils.import_utils import available_packages
 
 if available_packages["triton"]:
@@ -158,8 +159,10 @@ class QLinear(nn.Linear):
 
         self.calib_iterator = []
         # To simplify update of clipvals in forward()
-        self.quantize_feature = Qbypass()
-        self.quantize_calib_feature = Qbypass()
+        quantA_default = Qbypass() if "rot_" not in self.qa_mode else RotQuantWrapper()
+        quantW_default = Qbypass() if "rot_" not in self.qw_mode else RotQuantWrapper()
+        self.quantize_feature = quantA_default
+        self.quantize_calib_feature = quantA_default
         if self.num_bits_feature not in [32, 16]:
             self.quantize_feature = get_activation_quantizer(
                 self.qa_mode,
@@ -187,8 +190,8 @@ class QLinear(nn.Linear):
                     quantizer2sync=self.quantize_feature,
                 )
 
-        self.quantize_weight = Qbypass()
-        self.quantize_calib_weight = Qbypass()
+        self.quantize_weight = quantW_default
+        self.quantize_calib_weight = quantW_default
         if self.num_bits_weight not in [32, 16]:
             self.quantize_weight = get_weight_quantizer(
                 self.qw_mode,
