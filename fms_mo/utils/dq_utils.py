@@ -115,5 +115,15 @@ def config_quantize_smooth_layers(qcfg: dict):
             qcfg["smoothq_act_scale_path"] = "./act_scales/graniteCodeHF_34b_base12.pt"
         if "granite-34b-code-instruct" in qcfg["model"]:
             qcfg["smoothq_act_scale_path"] = "./act_scales/graniteCodeHF_34b_base12.pt"
+    elif "roberta" in qcfg["model"]:
+        qcfg["act_scale_path"] = "./act_scales"
+        qcfg["smoothq_scale_layers"] = [
+            "attention.self.query",
+            "attention.self.key",
+            "attention.self.value",
+            "intermediate.dense",
+        ]
+        qcfg["qskip_layer_name"] = []
+        qcfg["qlayer_name_pattern"] = ["roberta.encoder"]
     else:
         raise ValueError("The model architecture is not supported for DQ.")

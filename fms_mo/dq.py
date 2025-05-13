@@ -43,6 +43,7 @@ from fms_mo.quant.ptq import (
     get_act_scales,
     get_act_scales_1gpu,
 )
+from fms_mo.utils.aiu_utils import save_for_aiu
 from fms_mo.utils.dq_utils import config_quantize_smooth_layers
 from fms_mo.utils.eval_utils import Evaluator, eval_llm_1GPU
 from fms_mo.utils.utils import patch_torch_bmm, prepare_input
@@ -172,7 +173,7 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
 
     qcfg["seq_len"] = block_size
     qcfg["model"] = model_args.model_name_or_path
-    qcfg["smoothq"] = True
+    qcfg["smoothq"] = qcfg.get("smoothq_alpha", -1) >= 0
     qcfg["plotsvg"] = False
 
     calibration_dataset = load_from_disk(data_args.training_data_path)
@@ -199,7 +200,11 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
         scale_file.parent.mkdir(exist_ok=False)
 
     if scale_file.exists():
-        act_scales = torch.load(scale_file, map_location=getattr(model, "device", dev))
+        act_scales = torch.load(
+            scale_file,
+            map_location=getattr(model, "device", dev),
+            weights_only=True,
+        )
     else:
         logger.info("Generate activation scales")
         if qcfg["large_model"]:
@@ -217,10 +222,13 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
         save_fname="dq",
     )
     logger.info(f"Quantized model {model}")
-    logger.info("Starting to apply smooth scale")
-    dq_llm(model, act_scales, qcfg)
-    logger.info("Finished applying smooth scale")
     logger.info("==" * 20)
+
+    if qcfg["smoothq"]:
+        logger.info("Starting to apply smooth scale")
+        dq_llm(model, act_scales, qcfg)
+        logger.info("Finished applying smooth scale")
+
     if qcfg["qmodel_calibration_new"] > 0:
         logger.info("Starting to calibrate activation clip_val")
         if qcfg["large_model"]:
@@ -237,9 +245,15 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
                 with patch_torch_bmm(qcfg):
                     model(**data_mb)
 
-    logger.info(f"Saving quantized model and tokenizer to {opt_args.output_dir}")
-    model.save_pretrained(opt_args.output_dir, use_safetensors=True)
-    tokenizer.save_pretrained(opt_args.output_dir)
+    if opt_args.save_ckpt_for_aiu:
+        logger.info(
+            f"Saving model processed for AIU and tokenizer to {opt_args.output_dir}"
+        )
+        save_for_aiu(model, qcfg, output_dir=opt_args.output_dir, verbose=True)
+    elif opt_args.save_ckpt:
+        logger.info(f"Saving quantized model and tokenizer to {opt_args.output_dir}")
+        model.save_pretrained(opt_args.output_dir, use_safetensors=True)
+        tokenizer.save_pretrained(opt_args.output_dir)
 
     if fms_mo_args.eval_ppl:
         path_test = Path(data_args.test_data_path)

@@ -114,6 +114,7 @@ def config_defaults() -> dict:
         "extend_act_range": False,
         "plotsvg": False,
         "qskip_large_mag_layers": False,
+        "recompute_narrow_weights": False,
         # Iterable vars
         "qlayer_name_pattern": [],
         "qskip_layer_name": [],
@@ -306,6 +307,7 @@ def qconfig_init(recipe: str = None, args: Any = None) -> dict:
     qcfg["qlayer_name_pattern"] = []
     qcfg["qskip_layer_name"] = []
     qcfg["qskip_large_mag_layers"] = False
+    qcfg["recompute_narrow_weights"] = False
     qcfg["qspecial_layers"] = {}
 
     # settings about quantizing bmm/matmul
@@ -878,6 +880,7 @@ def check_config(config: dict, model_dtype: torch.dtype = None) -> None:
         "ptq_freezecvs",
         "ptq_qdrop",
         "qskip_large_mag_layers",
+        "recompute_narrow_weights",
         "smoothq",
     ]
     for boolean_var_str in boolean_vars_str:
