@@ -94,13 +94,23 @@ def test_triton_matmul_int8(mkn):
     torch_output = torch.matmul(a.to(torch.float), b.to(torch.float))
     # cast tl_matmul results to float because torch.norm only supports float
     tl_output_no_trun = tl_matmul(a, b).to(torch.float)
+    # check LSB truncation effect
     tl_output_trun_8b = tl_matmul(a, b, chunk_trun_bits=8).to(torch.float)
+    # check MSB truncation effect
+    # max(1 int8 * 1 int8) ~ 2^17 -> each chunk acc 32 elem, possible max ~ 2^22
+    # -> truncate to 18b -> should see large err than LSB-only case
+    tl_output_trun_18b8b = tl_matmul(a, b, max_acc_bits=18, chunk_trun_bits=8).to(
+        torch.float
+    )
 
-    diff_no_trun = torch_output - tl_output_no_trun
-    diff_trun_8b = torch_output - tl_output_trun_8b
+    ref = torch.norm(torch_output)
+    rel_err_no_trun = torch.norm(torch_output - tl_output_no_trun) / ref
+    rel_err_trun_8b = torch.norm(torch_output - tl_output_trun_8b) / ref
+    rel_err_trun_18b8b = torch.norm(torch_output - tl_output_trun_18b8b) / ref
 
-    assert torch.norm(diff_no_trun) / torch.norm(torch_output) < 1e-5
-    assert torch.norm(diff_trun_8b) / torch.norm(torch_output) < 1e-2
+    assert rel_err_no_trun < 1e-5
+    assert rel_err_trun_8b < 1e-2
+    assert rel_err_trun_18b8b < 1e-2
 
 
 @pytest.mark.parametrize("feat_in_out", [(64, 128), (256, 1024), (1024, 4096)])

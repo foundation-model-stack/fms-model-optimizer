@@ -1129,6 +1129,7 @@ class QLinearINT8Deploy(nn.Linear):
                 # will use real imatmul written in triton
                 imm_func = partial(
                     tl_matmul,
+                    max_acc_bits=self.max_acc_bits,
                     chunk_trun_bits=self.truncate_lsb,
                     chunk_size=self.chunk_size,
                 )
