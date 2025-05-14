@@ -173,6 +173,8 @@ class FMSMOArguments(TypeChecker):
         default=2048, metadata={"help": "input sequence length after tokenization"}
     )
     eval_ppl: bool = field(default=False)
+    inference: bool = field(default=False)
+
 
 
 @dataclass

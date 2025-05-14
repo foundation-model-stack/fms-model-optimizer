@@ -19,7 +19,7 @@ import logging
 
 # Local
 from fms_mo.prep import qmodel_prep
-from fms_mo.utils.qconfig_utils import qconfig_init
+from fms_mo.utils.qconfig_utils import qconfig_init, qconfig_load
 
 VERSION_FALLBACK = "0.0.0"
 
