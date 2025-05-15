@@ -53,6 +53,7 @@ if torch.cuda.is_available():
         with pytest.raises(RuntimeError):
             qmodel_prep(model_quantized, sample_input_fp32, config_fp32)
 
+
 def test_recipe_not_present(
     wrong_recipe_name: str,
 ):

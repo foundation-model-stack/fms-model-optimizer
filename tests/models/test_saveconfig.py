@@ -84,6 +84,7 @@ def test_save_config_wanted_pairs(
 
     delete_config()
 
+
 def test_save_config_with_qcfg_save(
     config_fp32: dict,
     save_list: list,
@@ -115,6 +116,7 @@ def test_save_config_with_qcfg_save(
 
     delete_config()
     del config_fp32["keys_to_save"]
+
 
 def test_save_config_with_recipe_save(
     config_fp32: dict,
@@ -153,6 +155,7 @@ def test_save_config_with_recipe_save(
 
     delete_config()
     delete_config("keys_to_save.json")
+
 
 def test_save_config_minimal(
     config_fp32: dict,
@@ -197,6 +200,7 @@ def test_double_qconfig_save(
         qconfig_save(config_fp32, minimal=False)
 
     delete_config()
+
 
 def test_qconfig_save_list_as_dict(
     config_fp32: dict,
@@ -247,7 +251,6 @@ def test_qconfig_save_recipe_as_dict(
     }
     save_json(save_dict, file_path="keys_to_save.json")
 
-
     with pytest.raises(ValueError):
         qconfig_save(config_fp32, recipe="keys_to_save.json", minimal=True)
 
@@ -265,7 +268,7 @@ def test_qconfig_load_with_recipe_as_list(
     """
     delete_config()
 
-    config_list = list( config_fp32.keys() )
+    config_list = list(config_fp32.keys())
 
     save_json(config_list, file_path="qcfg.json")
 
