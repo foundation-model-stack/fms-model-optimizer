@@ -25,13 +25,14 @@ import os
 from torchvision.io import read_image
 from torchvision.models import ResNet50_Weights, ViT_B_16_Weights, resnet50, vit_b_16
 from transformers import (
+    BatchEncoding,
     BertConfig,
     BertModel,
     BertTokenizer,
-    LlamaConfig,
-    LlamaModel,
     GraniteConfig,
     GraniteModel,
+    LlamaConfig,
+    LlamaModel,
 )
 import pytest
 import torch
@@ -663,12 +664,12 @@ def model_half(request):
 ###################################
 sample_input_fp32_params = [
     torch.randn(1, 3, 3, 3),
-    torch.randn(1, 3, 3, 3)*.001,
+    torch.randn(1, 3, 3, 3) * 0.001,
     torch.ones(1, 3, 3, 3),
 ]
 sample_input_fp16_params = [
     torch.randn(1, 3, 3, 3).half(),
-    (torch.randn(1, 3, 3, 3)*.001).half(),
+    (torch.randn(1, 3, 3, 3) * 0.001).half(),
     torch.ones(1, 3, 3, 3).half(),
 ]
 
@@ -806,9 +807,12 @@ def config_fp16(request):
     qconfig["nbits_w"] = 16
     return qconfig
 
+
 keys_to_save_params = [
     ["qa_mode", "qw_mode", "nbits_a", "nbits_w", "qskip_layer_name"],
 ]
+
+
 @pytest.fixture(scope="session", params=keys_to_save_params)
 def save_list(request):
     """
@@ -822,7 +826,9 @@ def save_list(request):
     """
     return request.param
 
+
 wrong_recipe_name_params = ["qat_int7", "pzq_int8"]
+
 
 @pytest.fixture(scope="session", params=wrong_recipe_name_params)
 def wrong_recipe_name(request):
@@ -836,6 +842,7 @@ def wrong_recipe_name(request):
         str: Bad recipe name
     """
     return request.param
+
 
 # Create QAT/PTQ int8 config fixture.
 config_params = ["qat_int8", "ptq_int8"]
@@ -1145,25 +1152,58 @@ def model_bert_eager():
     )
 
 
+#########################
+# Tiny Model Fake Input #
+#########################
+
+# Changing vocab_size and max_position_embeddings impacts all tiny models as well!
+vocab_size = 512
+max_position_embeddings = 512
+batch_size = 2
+size = (batch_size, max_position_embeddings)
+
+
+@pytest.fixture(scope="session")
+def input_tiny() -> BatchEncoding:
+    """
+    Create a fake input for tiny models w/ fixed vocab_size and max_position_embeddings
+
+    Returns:
+        BatchEncoding: Fake Encoding for a Tokenizer
+    """
+    # Random tokens and attention mask == 1
+    random_tokens = torch.randint(low=0, high=vocab_size, size=size)
+    attention_mask = torch.ones(size)
+
+    fake_tokenizer_output = BatchEncoding(
+        {
+            "input_ids": random_tokens,
+            "attention_mask": attention_mask,
+        }
+    )
+    return fake_tokenizer_output
+
+
 #############################
 # Tiny BERT Model Fixtures #
 #############################
 
+
 tiny_bert_config_params = [
     BertConfig(
-        vocab_size=512, # 30522
-        hidden_size=128, # 768
-        num_hidden_layers=2, # 12
-        num_attention_heads=2,# 12
-        intermediate_size=512, # 3072
-        max_position_embeddings=512, # 512
-        type_vocab_size=1, # 2
+        vocab_size=vocab_size,  # 30522
+        hidden_size=128,  # 768
+        num_hidden_layers=2,  # 12
+        num_attention_heads=2,  # 12
+        intermediate_size=512,  # 3072
+        max_position_embeddings=max_position_embeddings,  # 512
+        type_vocab_size=1,  # 2
     ),
 ]
 
 
 @pytest.fixture(scope="session", params=tiny_bert_config_params)
-def config_tiny_bert(request):
+def config_tiny_bert(request) -> BertConfig:
     """
     Get a tiny Bert config
 
@@ -1174,7 +1214,7 @@ def config_tiny_bert(request):
 
 
 @pytest.fixture(scope="function")
-def model_tiny_bert(config_tiny_bert):
+def model_tiny_bert(config_tiny_bert: BertConfig) -> BertModel:
     """
     Get a tiny Llama Model based on the config
 
@@ -1184,8 +1224,80 @@ def model_tiny_bert(config_tiny_bert):
     Returns:
         BertConfig: Tiny Bert model
     """
-    model = deepcopy(BertModel(config_tiny_bert))
+    model = BertModel(config=config_tiny_bert)
     return model
+
+
+qcfg_tiny_bert_update_params = [
+    {
+        "nbits_a": 8,
+        "nbits_w": 8,
+        "qa_mode": "pertokenmax",
+        "qw_mode": "max",
+        "smoothq": False,
+        "smoothq_scale_layers": [],
+        "qskip_layer_name": [
+            "embeddings.position_embeddings",
+            "embeddings.word_embeddings",
+            "embeddings.token_type_embeddings",
+            "pooler.dense",
+        ],
+        "qskip_large_mag_layers": False,
+        "recompute_narrow_weights": True,
+    },
+    {
+        "nbits_a": 8,
+        "nbits_w": 8,
+        "qa_mode": "maxsym",
+        "qw_mode": "maxperCh",
+        "smoothq": False,
+        "smoothq_scale_layers": [],
+        "qskip_layer_name": [
+            "embeddings.position_embeddings",
+            "embeddings.word_embeddings",
+            "embeddings.token_type_embeddings",
+            "pooler.dense",
+        ],
+        "qskip_large_mag_layers": False,
+        "recompute_narrow_weights": False,
+    },
+]
+
+
+@pytest.fixture(scope="function", params=qcfg_tiny_bert_update_params)
+def qcfg_bert(request) -> dict:
+    """
+    Quantization config for Tiny Bert
+
+    Args:
+        request (dict): Quantization config
+
+    Returns:
+        dict: Quantization config
+    """
+    qcfg = qconfig_init()
+
+    qcfg.update(request.param)
+
+    return qcfg
+
+
+@pytest.fixture(scope="function")
+def bert_linear_names() -> list:
+    """
+    Get Bert linear layers names in state dict
+
+    Returns:
+        list: Bert linear layer names
+    """
+    return [
+        "attention.self.query",
+        "attention.self.key",
+        "attention.self.value",
+        "attention.output.dense",
+        "intermediate.dense",
+        "output.dense",
+    ]
 
 
 #############################
@@ -1194,18 +1306,18 @@ def model_tiny_bert(config_tiny_bert):
 
 tiny_llama_config_params = [
     LlamaConfig(
-        vocab_size=1024, # 32000
-        hidden_size=128, # 4096
-        intermediate_size=256, # 11008
-        num_hidden_layers=2, # 32
-        num_attention_heads=2,# 32
-        max_position_embeddings=256, # 2048
+        vocab_size=vocab_size,  # 32000
+        hidden_size=128,  # 4096
+        intermediate_size=256,  # 11008
+        num_hidden_layers=2,  # 32
+        num_attention_heads=2,  # 32
+        max_position_embeddings=max_position_embeddings,  # 2048
     ),
 ]
 
 
 @pytest.fixture(scope="session", params=tiny_llama_config_params)
-def config_tiny_llama(request):
+def config_tiny_llama(request) -> LlamaConfig:
     """
     Get a tiny Llama config
 
@@ -1216,7 +1328,7 @@ def config_tiny_llama(request):
 
 
 @pytest.fixture(scope="function")
-def model_tiny_llama(config_tiny_llama):
+def model_tiny_llama(config_tiny_llama: LlamaConfig) -> LlamaModel:
     """
     Get a tiny Llama Model based on the config
 
@@ -1226,8 +1338,65 @@ def model_tiny_llama(config_tiny_llama):
     Returns:
         LlamaModel: Tiny Llama model
     """
-    model = deepcopy(LlamaModel(config_tiny_llama))
+    model = LlamaModel(config=config_tiny_llama)
     return model
+
+
+qcfg_tiny_llama_update_params = [
+    {
+        "nbits_a": 8,
+        "nbits_w": 8,
+        "qa_mode": "pertokenmax",
+        "qw_mode": "max",
+        "smoothq": False,
+        "smoothq_scale_layers": [],
+        "qskip_layer_name": [
+            "embeddings.position_embeddings",
+            "embeddings.word_embeddings",
+            "embeddings.token_type_embeddings",
+            "pooler.dense",
+        ],
+        "qskip_large_mag_layers": False,
+        "recompute_narrow_weights": True,
+    },
+]
+
+
+@pytest.fixture(scope="function", params=qcfg_tiny_llama_update_params)
+def qcfg_llama(request) -> dict:
+    """
+    Quantization config for Tiny Llama
+
+    Args:
+        request (dict): Quantization config
+
+    Returns:
+        dict: Quantization config
+    """
+    qcfg = qconfig_init()
+
+    qcfg.update(request.param)
+
+    return qcfg
+
+
+@pytest.fixture(scope="function")
+def llama_linear_names() -> list:
+    """
+    Get Llama linear layers names in state dict
+
+    Returns:
+        list: Llama linear layer names
+    """
+    return [
+        "self_attn.q_proj",
+        "self_attn.k_proj",
+        "self_attn.v_proj",
+        "self_attn.o_proj",
+        "mlp.gate_proj",
+        "mlp.up_proj",
+        "mlp.down_proj",
+    ]
 
 
 ###############################
@@ -1236,18 +1405,18 @@ def model_tiny_llama(config_tiny_llama):
 
 tiny_granite_config_params = [
     GraniteConfig(
-        vocab_size=1024, # 32000
-        hidden_size=128, # 4096
-        intermediate_size=256, # 11008
-        num_hidden_layers=2, # 32
-        num_attention_heads=2,# 32
-        max_position_embeddings=256, # 2048
+        vocab_size=vocab_size,  # 32000
+        hidden_size=128,  # 4096
+        intermediate_size=256,  # 11008
+        num_hidden_layers=2,  # 32
+        num_attention_heads=2,  # 32
+        max_position_embeddings=max_position_embeddings,  # 2048
     ),
 ]
 
 
 @pytest.fixture(scope="session", params=tiny_granite_config_params)
-def config_tiny_granite(request):
+def config_tiny_granite(request) -> GraniteConfig:
     """
     Get a tiny Granite config
 
@@ -1258,7 +1427,7 @@ def config_tiny_granite(request):
 
 
 @pytest.fixture(scope="function")
-def model_tiny_granite(config_tiny_granite):
+def model_tiny_granite(config_tiny_granite: GraniteConfig) -> GraniteModel:
     """
     Get a tiny Granite Model based on the config
 
@@ -1268,5 +1437,57 @@ def model_tiny_granite(config_tiny_granite):
     Returns:
         GraniteModel: Tiny Granite model
     """
-    model = deepcopy(GraniteModel(config_tiny_granite))
+    model = GraniteModel(config=config_tiny_granite)
     return model
+
+
+qcfg_tiny_granite_update_params = [
+    {
+        "nbits_a": 8,
+        "nbits_w": 8,
+        "qa_mode": "pertokenmax",
+        "qw_mode": "maxperCh",
+        "smoothq": False,
+        "smoothq_scale_layers": ["k_proj", "v_proj", "gate_proj", "up_proj"],
+        "qskip_layer_name": ["lm_head"],
+        "qskip_large_mag_layers": False,
+        "recompute_narrow_weights": False,
+    },
+]
+
+
+@pytest.fixture(scope="function", params=qcfg_tiny_granite_update_params)
+def qcfg_granite(request) -> dict:
+    """
+    Quantization config for Tiny Granite
+
+    Args:
+        request (dict): Quantization config
+
+    Returns:
+        dict: Quantization config
+    """
+    qcfg = qconfig_init()
+
+    qcfg.update(request.param)
+
+    return qcfg
+
+
+@pytest.fixture(scope="function")
+def granite_linear_names() -> list:
+    """
+    Get Granite linear layers names in state dict
+
+    Returns:
+        list: Granite linear layer names
+    """
+    return [
+        "self_attn.q_proj",
+        "self_attn.k_proj",
+        "self_attn.v_proj",
+        "self_attn.o_proj",
+        "mlp.gate_proj",
+        "mlp.up_proj",
+        "mlp.down_proj",
+    ]
