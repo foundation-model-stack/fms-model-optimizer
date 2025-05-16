@@ -742,7 +742,7 @@ class QLinearINT8Deploy(nn.Linear):
             for a_or_w in ["num_bits_feature", "num_bits_weight"]
         ), "Please check nbits setting!"
 
-        target_device = kwargs.get(
+        tar_dev = kwargs.get(
             "target_device",
             kwargs.get("device", next(fms_mo_qlinear.parameters()).device),
         )
@@ -751,7 +751,7 @@ class QLinearINT8Deploy(nn.Linear):
             fms_mo_qlinear.in_features,
             fms_mo_qlinear.out_features,
             bias=fms_mo_qlinear.bias is not None,
-            device=target_device,
+            device=tar_dev,
         )
         # Make sure to register an Op for integer matmul, could be real INT matmul or emulation
         qcfg = getattr(fms_mo_qlinear, "qcfg", {})
@@ -759,6 +759,7 @@ class QLinearINT8Deploy(nn.Linear):
             "use_int_kernel", qcfg.get("use_int_kernel", "cutlass")
         )
         qlin_int.usePTnativeQfunc = kwargs.get("use_PT_native_Qfunc", False)
+        qlin_int.useDynMaxQfunc = kwargs.get("use_dynamic_max_act_Qfunc", False)
         qlin_int.max_acc_bits = kwargs.get("max_acc_bits", 32)
         qlin_int.accminmax = (
             -(1 << (qlin_int.max_acc_bits - 1)),
@@ -773,34 +774,48 @@ class QLinearINT8Deploy(nn.Linear):
         with torch.no_grad():
             Qa = fms_mo_qlinear.quantize_feature
             Qw = fms_mo_qlinear.quantize_weight
-            a_cv, a_cvn = Qa.clip_val.item(), Qa.clip_valn.item()
             w_cv = Qw.clip_val.item()
+            if qlin_int.useDynMaxQfunc in [-1, -2]:  # [-1, -2] indicates reduce_dim
+                # dynamic Qmax has no clipvals, reg fake ones, won't be used in real calc
+                Qa.register_buffer("clip_val", torch.tensor(8.0, device=tar_dev))
+                Qa.register_buffer("clip_valn", torch.tensor(-8.0, device=tar_dev))
+            a_cv, a_cvn = Qa.clip_val.item(), Qa.clip_valn.item()
+            # Store original cv_a and cv_w (in python floats, not tensors), and sq scales
+            # for later use (probably not necessary)
+            qlin_int.cvs = [a_cv, a_cvn, w_cv]
             # NOTE: Keep w transposed to prevent confusion
             Qw.dequantize = False
-            w_int8 = Qw(
-                fms_mo_qlinear.weight.float()
-            )  # Qw.clipval should have been updated after this
+            # trigger Qw.clipval re-calc for SAWB (if needed)
+            w_int8 = Qw(fms_mo_qlinear.weight.float())
             qlin_int.weight = nn.Parameter(
                 w_int8.to(torch.int8), requires_grad=False
             )  # NOTE: may need INT W stored as FP in some cases
 
-            if qlin_int.usePTnativeQfunc:
+            if qlin_int.useDynMaxQfunc in [-1, -2]:
+                input_scale = torch.tensor(1.0, device=tar_dev)
+                input_zero_point = torch.tensor(128, dtype=torch.int, device=tar_dev)
+                w_scale = torch.tensor(
+                    [w_cv * 2 / (2**qlin_int.nbits_w - 2)], device=tar_dev
+                )
+            elif qlin_int.usePTnativeQfunc:
                 input_scale = torch.tensor(
-                    [(a_cv - a_cvn) / (2**qlin_int.nbits_a - 1)], device=target_device
+                    [(a_cv - a_cvn) / (2**qlin_int.nbits_a - 1)], device=tar_dev
                 )
                 input_zero_point = torch.round(-a_cvn / input_scale).to(torch.int)
-                w_scale = torch.tensor([w_cv * 2 / (2**qlin_int.nbits_w - 2)])
+                w_scale = torch.tensor(
+                    [w_cv * 2 / (2**qlin_int.nbits_w - 2)], device=tar_dev
+                )
             else:
                 # fms_mo formula is a bit different from conventional PT formula
                 quant_scale = (2**qlin_int.nbits_a - 1) / torch.tensor(
-                    [a_cv - a_cvn], device=target_device
+                    [a_cv - a_cvn], device=tar_dev
                 )
                 quant_stepsize = 1.0 / quant_scale
                 quant_zero_point = torch.round(a_cvn * quant_scale)
                 input_scale = quant_stepsize
                 input_zero_point = -quant_zero_point
                 quant_w_scale = (2**qlin_int.nbits_a - 2) / torch.tensor(
-                    [w_cv * 2], device=target_device
+                    [w_cv * 2], device=tar_dev
                 )
                 w_scale = 1.0 / quant_w_scale
                 qlin_int.register_buffer("quant_scale", quant_scale)
@@ -812,9 +827,6 @@ class QLinearINT8Deploy(nn.Linear):
             qlin_int.register_buffer("input_zp", input_zero_point)
             qlin_int.register_buffer("w_scale", w_scale)
             qlin_int.register_buffer("w_zp", w_zp)
-            # Store original cv_a and cv_w (in python floats, not tensors), and sq scales
-            # for later verification
-            qlin_int.cvs = [Qa.clip_val.item(), Qa.clip_valn.item(), Qw.clip_val.item()]
 
             corr_term = (
                 (input_zero_point - 128)
@@ -836,17 +848,14 @@ class QLinearINT8Deploy(nn.Linear):
                 qlin_int.register_buffer("bias", -corr_term.to(fms_mo_w_dtype))
                 qlin_int.org_model_has_bias = False
 
-        qlin_int.register_buffer("Qa_clip_val", Qa.clip_val.detach())
-        qlin_int.register_buffer(
-            "Qa_clip_valn", Qa.clip_valn.detach()
-        )  # TODO: case for PACT?
-        qlin_int.register_buffer(
-            "Qw_clip_val", Qw.clip_val.detach()
-        )  # asym W quantizer may have clipvaln
+        # redundant variables to be cleaned up
+        # qlin_int.register_buffer("Qa_clip_val", Qa.clip_val.detach())
+        # qlin_int.register_buffer("Qa_clip_valn", Qa.clip_valn.detach())
+        # qlin_int.register_buffer("Qw_clip_val", Qw.clip_val.detach())
 
         qlin_int.set_matmul_op()
 
-        return qlin_int.to(target_device)
+        return qlin_int.to(tar_dev)
 
     @classmethod
     def from_torch_iW(cls, nnlin_iW, prec, a_cv, a_cvn, w_cv, zero_shift, **kwargs):
@@ -988,25 +997,15 @@ class QLinearINT8Deploy(nn.Linear):
         """
         Quantizes the input tensor x to 8-bit integer values using raw formula, slower if not
         torch.compiled
-
-        Args:
-            x (Tensor): Input tensor to be quantized.
-
-        Returns:
-            Tensor: Quantized tensor with values in the range [-128, 127].
         """
         x = torch.clamp((x / self.input_scale + self.input_zp - 128).round(), -128, 127)
         return x.to(torch.int8)
 
     def qa_fmo_mo_qfunc(self, x):
         """
-        Quantizes the input tensor x to 8-bit integer values.
-
-        Args:
-            x (Tensor): Input tensor to be quantized.
-
-        Returns:
-            Tensor: Quantized tensor with values in the range [-128, 127].
+        Quantizes the input tensor x to 8-bit integer values. Note that old fms-mo formula clamps
+        before rounds, as opposed to typical torch formula that rounds before clamps.
+        (See qa_raw_qfunc() above.)
         """
         x = (
             torch.round(
@@ -1016,6 +1015,21 @@ class QLinearINT8Deploy(nn.Linear):
             - 128
         )
         return x.to(torch.int8)
+
+    def qa_dynamic_max_qfunc(self, x):
+        """
+        Symmetric dynamic quantizer, same as QDynMax, which allows per-token or per-channel.
+        This quantizer will not use self.input_scale but instead will update it every time.
+        NOTE
+        1. self.input_scale.shape should be (x.shape[-2], ) if reduce_dim == -1 and (, x.shape[-1])
+            for reduce_dim == -2.
+        2. input_scale should be be broadcasted correctly together with W_scale (e.g. if per-Ch) at
+            final output step, i.e. imm_out*(a_scale*w_scale)*...
+        """
+        amax = x.abs().max(dim=self.useDynMaxQfunc, keepdim=True)[0]
+        levels = 2 ** (self.nbits_a - 1) - 1
+        self.input_scale = amax.clamp(min=1e-5).div(levels)
+        return torch.round(x / self.input_scale).to(torch.int8)
 
     def iaddmm_int(self, bias, m1, m2):
         """
@@ -1034,7 +1048,9 @@ class QLinearINT8Deploy(nn.Linear):
             The result of the integer matrix multiplication with the bias added.
         """
 
-        if self.usePTnativeQfunc:
+        if self.useDynMaxQfunc in [-1, -2]:
+            m1 = self.qa_dynamic_max_qfunc(m1)
+        elif self.usePTnativeQfunc:
             m1 = self.qa_raw_qfunc(m1)
         else:
             m1 = self.qa_fmo_mo_qfunc(m1)

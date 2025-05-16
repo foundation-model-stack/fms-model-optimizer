@@ -633,14 +633,17 @@ def exllama_ops_load_and_reg(qcfg=None, run_unit_test=False):
 
 
 def imatmul_ops_reg(
-    useCUTLASS=True, mm_func=torch.matmul, AB_dtype=torch.float, D_dtype=torch.float
+    useINTkernel="triton",
+    mm_func=torch.matmul,
+    AB_dtype=torch.float,
+    D_dtype=torch.float,
 ):
     """This function will register a dummy Q_imatmul Op for better "graph representation".
     Args:
-        useCUTLASS: bool. choose to use a) real INT matmul using cutlass kernel or b) "simulated"
-                    imatmul using torch.matmul.
+        useINTkernel: str|bool. ["cutlass", "triton", False]. choose to use a) real INT matmul, e.g.
+                    cutlass or triton kernel or b) "simulated" imatmul using torch.matmul.
                     For b), could use D_dtype to select fp16 or fp32 accumulation
-        mm_func: matmul func to be used when useCUTLASS is True, should be a real callable kernel
+        mm_func: matmul func to be used when useINTkernel is True, should be a real callable kernel
                 from cutlass, but for debug purpose, could use torch.matmul as well.
         AB_dtype: datatype for input tensors
         D_dtype: datatype for accumulation and output tensor
@@ -697,10 +700,10 @@ def imatmul_ops_reg(
         tar_shape = tuple(m1.shape[:-1]) + (m2.shape[1],)
         m1 = m1.view(re_shape)
 
-        if useCUTLASS:
+        if useINTkernel:
             assert (
                 m1.dtype == torch.int8 and m2.dtype == torch.int8
-            ), "When using cutlass int matmul, inputs must be 2D INT8"
+            ), "When using int matmul, inputs must be 2D and INT8."
             return mm_func(m1, m2).reshape(tar_shape)
 
         outf32_or_f16 = torch.empty(
@@ -759,7 +762,7 @@ def imatmul_ops_reg(
         assert m2.dtype == torch.int8, f"weight tensor is of incorrect dtype {m2.dtype}"
         m1 = torch.clamp((m1 / scale_i + zp_i - 128).round(), -128, 127).to(torch.int8)
 
-        if useCUTLASS:
+        if useINTkernel:
             mm_i32 = mm_func(m1, m2)
         else:
             outf32_or_f16 = torch.empty(
