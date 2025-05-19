@@ -145,7 +145,7 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
     ]
     qcfg["large_model"] = any(
         name in model_args.model_name_or_path for name in known_large_models
-    ) or (gpu_mem_util_per > 0.1)
+    ) or (gpu_mem_util_per > 0.7)
     dev = "cpu" if qcfg["large_model"] else "cuda"
     if model_args.device_map is None:
         model.to(dev)
@@ -175,7 +175,6 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
     qcfg["model"] = model_args.model_name_or_path
     qcfg["smoothq"] = True
     qcfg["plotsvg"] = False
-    
 
     calibration_dataset = load_from_disk(data_args.training_data_path)
     calibration_dataset = calibration_dataset.with_format("torch")
@@ -186,8 +185,7 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
         collate_fn=default_data_collator,
         batch_size=1,
     )
-    #print(fms_mo_args)
-    #ii
+
     # For loading or creating smoothquant scale. Sometimes we may include scales in ckpt as well.
     if not fms_mo_args.inference:
         scale_file = Path(f"./act_scales/{qcfg['model'].replace('/', '-')}.pt")

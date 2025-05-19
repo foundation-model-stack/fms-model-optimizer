@@ -176,7 +176,6 @@ class FMSMOArguments(TypeChecker):
     inference: bool = field(default=False)
 
 
-
 @dataclass
 class GPTQArguments(TypeChecker):
     """Dataclass for GPTQ related arguments that will be used by auto-gptq."""

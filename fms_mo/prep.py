@@ -902,7 +902,7 @@ def qmodel_prep(
             model, device_ids=DPorDDPdevices
         )
 
-    qconfig_save(qcfg, fname="qcfg2.json")
+    qconfig_save(qcfg, fname="qcfg.json")
     qcfg["tb_writer"] = tb_writer
 
     logger.info(f"--- Quantized model --- \n{model}\n")
