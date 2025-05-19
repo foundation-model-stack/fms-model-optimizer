@@ -214,9 +214,8 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
     else:
         import json
         q_file = open('qcfg_llama.json', "r", encoding="utf-8")
-        a = json.load(q_file)
-        print(a)
-        qcfg.update(a)
+        saved_qcfg = json.load(q_file)
+        qcfg.update(saved_qcfg)
         print(qcfg)
         
     qmodel_prep(
