@@ -3,11 +3,7 @@ from transformers import BatchEncoding, BertModel, GraniteModel, LlamaModel
 import pytest
 
 # Local
-from .test_model_utils import (
-    check_linear_dtypes,
-    delete_config,
-    load_state_dict,
-)
+from .test_model_utils import check_linear_dtypes, delete_config, load_state_dict
 from fms_mo import qmodel_prep
 from fms_mo.utils.aiu_utils import save_for_aiu
 
@@ -61,12 +57,13 @@ def test_large_outlier_bert(
         qcfg_bert (dict): Fake tiny input
         bert_linear_names (list): Quantized config for Bert
     """
+    # Third Party
     import torch
 
     # Break every tensor channel with a large magnitude outlier
-    for k,v in model_tiny_bert.state_dict().items():
+    for k, v in model_tiny_bert.state_dict().items():
         if k.endswith(".weight") and any(n in k for n in bert_linear_names):
-            v[:,0] = 1.21
+            v[:, 0] = 1.21
 
     # Set recomputation for narrow weights and prep
     qcfg_bert["recompute_narrow_weights"] = True
@@ -74,7 +71,7 @@ def test_large_outlier_bert(
 
     # Qmax should break the quantization with an outlier to have skinny distribution
     layer2stdev: dict[str, torch.Tensor] = {}
-    for k,v in model_tiny_bert.state_dict().items():
+    for k, v in model_tiny_bert.state_dict().items():
         if k.endswith(".weight") and any(n in k for n in bert_linear_names):
             layer2stdev[k] = v.to(torch.float32).std(dim=-1)
 
@@ -82,11 +79,11 @@ def test_large_outlier_bert(
     state_dict = load_state_dict()
 
     # Loaded model w/ recomputed SAWB should have widened channel quantization stdev
-    for k,v in state_dict.items():
+    for k, v in state_dict.items():
         if k.endswith(".weight") and any(n in k for n in bert_linear_names):
             perCh_stdev_model = layer2stdev.get(k)
             perCh_stdev_loaded = v.to(torch.float32).std(dim=-1)
-           
+
             assert torch.all(perCh_stdev_loaded >= perCh_stdev_model)
 
 
@@ -136,4 +133,3 @@ def test_save_model_granite(
     # Fetch saved state dict
     state_dict = load_state_dict()
     check_linear_dtypes(state_dict, granite_linear_names)
-
