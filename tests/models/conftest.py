@@ -25,7 +25,6 @@ import os
 from torchvision.io import read_image
 from torchvision.models import ResNet50_Weights, ViT_B_16_Weights, resnet50, vit_b_16
 from transformers import (
-    BatchEncoding,
     BertConfig,
     BertModel,
     BertTokenizer,
@@ -36,6 +35,7 @@ from transformers import (
 )
 import pytest
 import torch
+from torch.utils.data import TensorDataset, DataLoader
 
 # Local
 # fms_mo imports
@@ -1163,25 +1163,27 @@ batch_size = 2
 size = (batch_size, max_position_embeddings)
 
 
-@pytest.fixture(scope="session")
-def input_tiny() -> BatchEncoding:
+@pytest.fixture(scope="function")
+def input_tiny() -> DataLoader:
     """
     Create a fake input for tiny models w/ fixed vocab_size and max_position_embeddings
 
     Returns:
-        BatchEncoding: Fake Encoding for a Tokenizer
+        DataLoader: Fake Encoding for a Tokenizer
     """
     # Random tokens and attention mask == 1
     random_tokens = torch.randint(low=0, high=vocab_size, size=size)
     attention_mask = torch.ones(size)
 
-    fake_tokenizer_output = BatchEncoding(
-        {
-            "input_ids": random_tokens,
-            "attention_mask": attention_mask,
-        }
+    dataset = TensorDataset(random_tokens, attention_mask)
+    # qmodel_prep expects dataloader batch=tuple(tensor, tensor)
+    # Without collate_fn, it returns batch=list(tensor,tensor)
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=lambda batch: tuple(torch.stack(samples) for samples in zip(*batch))
     )
-    return fake_tokenizer_output
 
 
 #############################
@@ -1234,6 +1236,7 @@ qcfg_tiny_bert_update_params = [
         "nbits_w": 8,
         "qa_mode": "pertokenmax",
         "qw_mode": "max",
+        "qmodel_calibration": 1,
         "smoothq": False,
         "smoothq_scale_layers": [],
         "qskip_layer_name": [
@@ -1250,6 +1253,7 @@ qcfg_tiny_bert_update_params = [
         "nbits_w": 8,
         "qa_mode": "maxsym",
         "qw_mode": "maxperCh",
+        "qmodel_calibration": 1,
         "smoothq": False,
         "smoothq_scale_layers": [],
         "qskip_layer_name": [
@@ -1348,6 +1352,7 @@ qcfg_tiny_llama_update_params = [
         "nbits_w": 8,
         "qa_mode": "pertokenmax",
         "qw_mode": "max",
+        "qmodel_calibration": 1,
         "smoothq": False,
         "smoothq_scale_layers": [],
         "qskip_layer_name": [
@@ -1447,6 +1452,7 @@ qcfg_tiny_granite_update_params = [
         "nbits_w": 8,
         "qa_mode": "pertokenmax",
         "qw_mode": "maxperCh",
+        "qmodel_calibration": 1,
         "smoothq": False,
         "smoothq_scale_layers": ["k_proj", "v_proj", "gate_proj", "up_proj"],
         "qskip_layer_name": ["lm_head"],
