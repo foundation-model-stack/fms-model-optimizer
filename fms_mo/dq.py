@@ -154,6 +154,7 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
         qcfg["model_type"] = model.config.model_type
 
     qcfg["model"] = model_args.model_name_or_path
+    qcfg["qskip_large_mag_layers"] = True
     # config layers to skip, smooth scale
     config_quantize_smooth_layers(qcfg)
 
@@ -186,27 +187,34 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
     )
 
     # For loading or creating smoothquant scale. Sometimes we may include scales in ckpt as well.
-    scale_file = Path(f"./act_scales/{qcfg['model'].replace('/', '-')}.pt")
-    if qcfg.get("act_scale_path", None):
-        # user provided a scale file (or a dir)
-        scale_file_or_dir = Path(qcfg["act_scale_path"])
-        if scale_file_or_dir.is_dir():
-            scale_file = scale_file_or_dir / f"{qcfg['model'].replace('/', '-')}.pt"
-        elif scale_file_or_dir.is_file():
-            scale_file = scale_file_or_dir
+    if not fms_mo_args.inference:
+        scale_file = Path(f"./act_scales/{qcfg['model'].replace('/', '-')}.pt")
+        if qcfg.get("act_scale_path", None):
+            # user provided a scale file (or a dir)
+            scale_file_or_dir = Path(qcfg["act_scale_path"])
+            if scale_file_or_dir.is_dir():
+                scale_file = scale_file_or_dir / f"{qcfg['model'].replace('/', '-')}.pt"
+            elif scale_file_or_dir.is_file():
+                scale_file = scale_file_or_dir
 
-    if not scale_file.parent.exists():
-        scale_file.parent.mkdir(exist_ok=False)
+        if not scale_file.parent.exists():
+            scale_file.parent.mkdir(exist_ok=False)
 
-    if scale_file.exists():
-        act_scales = torch.load(scale_file, map_location=getattr(model, "device", dev))
-    else:
-        logger.info("Generate activation scales")
-        if qcfg["large_model"]:
-            act_scales = get_act_scales_1gpu(model, dq_dataloader, qcfg)
+        if scale_file.exists():
+            act_scales = torch.load(scale_file, map_location=getattr(model, "device", dev))
         else:
-            act_scales = get_act_scales(model, dq_dataloader, qcfg)
-        torch.save(act_scales, scale_file)
+            logger.info("Generate activation scales")
+            if qcfg["large_model"]:
+                act_scales = get_act_scales_1gpu(model, dq_dataloader, qcfg)
+            else:
+                act_scales = get_act_scales(model, dq_dataloader, qcfg)
+            torch.save(act_scales, scale_file)
+    else:
+        import json
+        q_file = open('qcfg_llama.json', "r", encoding="utf-8")
+        saved_qcfg = json.load(q_file)
+        qcfg.update(saved_qcfg)
+        
     qmodel_prep(
         model,
         dq_dataloader,
@@ -214,32 +222,39 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
         use_layer_name_pattern_matching=use_layer_name_pattern_matching,
         use_dynamo=use_dynamo,
         dev=dev,
+        mode=fms_mo_args.inference,
         save_fname="dq",
     )
     logger.info(f"Quantized model {model}")
-    logger.info("Starting to apply smooth scale")
-    dq_llm(model, act_scales, qcfg)
-    logger.info("Finished applying smooth scale")
-    logger.info("==" * 20)
-    if qcfg["qmodel_calibration_new"] > 0:
-        logger.info("Starting to calibrate activation clip_val")
-        if qcfg["large_model"]:
-            calibration_llm_1GPU(qcfg, model, dq_dataloader)
-        else:
-            model.to("cuda:0")
-            pbar = tqdm(
-                dq_dataloader,
-                desc=" calibration after applying smoothq scale and before inference",
-                total=qcfg["qmodel_calibration_new"],
-            )
-            for data_mb, _ in zip(pbar, range(qcfg["qmodel_calibration_new"])):
-                data_mb = prepare_input(model.device, data_mb)
-                with patch_torch_bmm(qcfg):
-                    model(**data_mb)
 
-    logger.info(f"Saving quantized model and tokenizer to {opt_args.output_dir}")
-    model.save_pretrained(opt_args.output_dir, use_safetensors=True)
-    tokenizer.save_pretrained(opt_args.output_dir)
+    if not fms_mo_args.inference:
+        logger.info("Starting to apply smooth scale")
+        dq_llm(model, act_scales, qcfg)
+        logger.info("Finished applying smooth scale")
+        logger.info("==" * 20)
+        if qcfg["qmodel_calibration_new"] > 0:
+            logger.info("Starting to calibrate activation clip_val")
+            if qcfg["large_model"]:
+                calibration_llm_1GPU(qcfg, model, dq_dataloader)
+            else:
+                model.to("cuda:0")
+                pbar = tqdm(
+                    dq_dataloader,
+                    desc=" calibration after applying smoothq scale and before inference",
+                    total=qcfg["qmodel_calibration_new"],
+                )
+                for data_mb, _ in zip(pbar, range(qcfg["qmodel_calibration_new"])):
+                    data_mb = prepare_input(model.device, data_mb)
+                    with patch_torch_bmm(qcfg):
+                        model(**data_mb)
+        logger.info(f"Saving quantized model and tokenizer to {opt_args.output_dir}")
+        model.save_pretrained(opt_args.output_dir, use_safetensors=True)
+        tokenizer.save_pretrained(opt_args.output_dir)
+    else:
+        from accelerate import load_checkpoint_and_dispatch
+        model = load_checkpoint_and_dispatch( model, checkpoint=opt_args.output_dir, device_map=None, no_split_module_classes=['Block'])
+
+
 
     if fms_mo_args.eval_ppl:
         path_test = Path(data_args.test_data_path)
@@ -253,7 +268,7 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
 
         logger.info(f"Model for evaluation: {model}")
         if qcfg["large_model"]:
-            eval_llm_1GPU(qcfg, model, test_dataset)
+            eval_llm_1GPU(qcfg, model.to('cpu'), test_dataset)
         else:
             model.to(torch.device("cuda:0"))
             n_samples = int(test_dataset.input_ids.shape[1] / block_size)

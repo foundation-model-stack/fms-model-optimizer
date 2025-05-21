@@ -623,7 +623,7 @@ def qconfig_save(
 def qconfig_load(fname: str = "qcfg.json") -> dict:
     """Read config in json format, work together with qconfig_save"""
     config = get_recipe(fname)
-
+    
     if config:
         # Check that loaded file is a dict
         if not isinstance(config, dict):
