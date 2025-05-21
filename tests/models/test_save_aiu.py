@@ -3,7 +3,7 @@ from transformers import BatchEncoding, BertModel, GraniteModel, LlamaModel
 import pytest
 
 # Local
-from .test_model_utils import check_linear_dtypes, delete_config, load_state_dict
+from .test_model_utils import check_linear_dtypes, delete_file, load_state_dict
 from fms_mo import qmodel_prep
 from fms_mo.utils.aiu_utils import save_for_aiu
 
@@ -13,9 +13,9 @@ def delete_files():
     """
     Delete any known files lingering before starting test
     """
-    delete_config("qcfg.json")
-    delete_config("keys_to_save.json")
-    delete_config("qmodel_for_aiu.pt")
+    delete_file("qcfg.json")
+    delete_file("keys_to_save.json")
+    delete_file("qmodel_for_aiu.pt")
 
 
 def test_save_model_bert(

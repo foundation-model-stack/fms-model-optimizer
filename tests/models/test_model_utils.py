@@ -145,9 +145,9 @@ def qmodule_error(
 ###############################
 
 
-def delete_config(file_path: str = "qcfg.json"):
+def delete_file(file_path: str = "qcfg.json"):
     """
-    Delete a qconfig at the file path provided
+    Delete a file at the file path provided
 
     Args:
         file_path (str, optional): Qconfig file to delete. Defaults to "qcfg.json".
@@ -219,7 +219,7 @@ def load_state_dict(fname: str = "qmodel_for_aiu.pt") -> dict:
     Returns:
         dict: Model state dictionary
     """
-    return torch.load(fname)
+    return torch.load(fname, weights_only=True)
 
 
 def check_linear_dtypes(state_dict: dict, linear_names: list):

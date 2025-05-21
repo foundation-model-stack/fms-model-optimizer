@@ -27,7 +27,16 @@ import transformers
 from fms_mo import qconfig_init, qmodel_prep
 from fms_mo.prep import has_quantized_module
 from fms_mo.utils.utils import patch_torch_bmm
-from tests.models.test_model_utils import count_qmodules, delete_config, qmodule_error
+from tests.models.test_model_utils import count_qmodules, delete_file, qmodule_error
+
+
+@pytest.fixture(autouse=True)
+def delete_files():
+    """
+    Delete any known files lingering before starting test
+    """
+    delete_file("qcfg.json")
+
 
 ################
 # Qmodel tests #
@@ -49,7 +58,6 @@ if torch.cuda.is_available():
             sample_input_fp32 (torch.FloatTensor): Sample fp32 input for calibration.
             config_fp32 (dict): Config w/ fp32 settings
         """
-        delete_config()
         with pytest.raises(RuntimeError):
             qmodel_prep(model_quantized, sample_input_fp32, config_fp32)
 
@@ -81,11 +89,9 @@ def test_double_qmodel_prep_assert(
         sample_input_fp32 (torch.FloatTensor): Sample fp32 input for calibration
         config_fp32 (dict): Config w/ fp32 settings
     """
-    delete_config()
-
     # Run qmodel_prep once
     qmodel_prep(model_fp32, sample_input_fp32, config_fp32)
-    delete_config()
+    delete_file()
 
     # If model now has a quantized node, ensure it has raises a RuntimeError
     if has_quantized_module(model_fp32):
@@ -107,7 +113,6 @@ def test_config_recipes_fp32(
         sample_input_fp32 (torch.FloatTensor): Sample fp32 input for calibration
         config (dict): Recipe Config w/ int8 settings
     """
-    delete_config()
     qmodel_prep(model_fp32, sample_input_fp32, config_int8)
 
 
@@ -124,7 +129,6 @@ def test_config_recipes_fp16(
         sample_input_fp16 (torch.FloatTensor): Sample fp16 input for calibration
         config (dict): Recipe Config w/ int8 settings
     """
-    delete_config()
     qmodel_prep(model_fp16, sample_input_fp16, config_int8)
 
 
@@ -145,7 +149,6 @@ def test_config_fp32_qmodes(
         qa_mode (str): Activation quantizer
         qw_mode (str): Weight quantizer
     """
-    delete_config()
     config_int8["qa_mode"] = qa_mode
     config_int8["qw_mode"] = qw_mode
     qmodel_prep(model_config_fp32, sample_input_fp32, config_int8)
@@ -170,7 +173,6 @@ def test_resnet50_torchscript(
         config (dict): Recipe Config w/ int8 settings
     """
     # Run qmodel_prep w/ default torchscript tracer
-    delete_config()
     qmodel_prep(model_resnet, batch_resnet, config_int8, use_dynamo=False)
     qmodule_error(model_resnet, 6, 48)
 
@@ -189,7 +191,6 @@ def test_resnet50_dynamo(
         config (dict): Recipe Config w/ int8 settings
     """
     # Run qmodel_prep w/ Dynamo tracer
-    delete_config()
     qmodel_prep(model_resnet, batch_resnet, config_int8, use_dynamo=True)
     qmodule_error(model_resnet, 6, 48)
 
@@ -209,7 +210,6 @@ def test_resnet50_dynamo_layers(
         config (dict): Recipe Config w/ int8 settings
     """
     # Run qmodel_prep w/ qlayer_name_pattern + Dynamo tracer
-    delete_config()
     config_int8["qlayer_name_pattern"] = ["layer[1,2,4]"]  # allow regex
     qmodel_prep(model_resnet, batch_resnet, config_int8, use_dynamo=True)
     qmodule_error(model_resnet, 21, 33)
@@ -230,7 +230,6 @@ def test_vit_torchscript(
         config (dict): Recipe Config w/ int8 settings
     """
     # Run qmodel_prep w/ default torchscript tracer
-    delete_config()
     qmodel_prep(model_vit, batch_vit, config_int8, use_dynamo=False)
     qmodule_error(model_vit, 2, 36)
 
@@ -249,7 +248,6 @@ def test_vit_dynamo(
         config (dict): Recipe Config w/ int8 settings
     """
     # Run qmodel_prep w/ Dynamo tracer
-    delete_config()
     qmodel_prep(model_vit, batch_vit, config_int8, use_dynamo=True)
     qmodule_error(model_vit, 2, 36)
 
@@ -268,7 +266,6 @@ def test_bert_dynamo(
         config (dict): Recipe Config w/ int8 settings
     """
     # Run qmodel_prep w/ Dynamo tracer
-    delete_config()
     qmodel_prep(model_bert, input_bert, config_int8, use_dynamo=True)
     qmodule_error(model_bert, 1, 72)
 
@@ -295,7 +292,6 @@ def test_bert_dynamo_wi_qbmm(
         input_bert (torch.FloatTensor): Tokenized input for BERT
         config (dict): Recipe Config w/ int8 settings
     """
-    delete_config()
     config_int8["nbits_bmm1"] = 8
     config_int8["nbits_bmm2"] = 8
     qmodel_prep(model_bert_eager, input_bert, config_int8, use_dynamo=True)
