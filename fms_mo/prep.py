@@ -535,7 +535,18 @@ def has_quantized_module(model):
     """Check if model is already quantized - do not want to quantize twice if so"""
     return any(isinstance(m, quantized_modules) for m in model.modules())
 
-def swap_qbmm(model, qcfg):
+def swap_qbmm(model: nn.Module, qcfg: dict):
+    """Go through all model.named_modules(), try to create an equivalent Qbmm layer to replace each of
+    the existing linear Bmm layers.
+
+    Args:
+        model (nn.Module): input model to be "prepared"
+        qcfg (dict): quant config
+
+    Returns: updated model is returned with the Qbmm added
+        
+    """
+
     from fms_mo.modules import QBmm
 
     qcfg["which2patch_contextmanager"] = qcfg["bmm_prep"][
@@ -650,7 +661,6 @@ def qmodel_prep(
     if mode:
         
         if qcfg.get("QBmm"): 
-            pass
             swap_qbmm(model,qcfg)
 
         model = q_any_net_5(model, qcfg, verbose = False)

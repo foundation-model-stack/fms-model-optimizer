@@ -35,7 +35,7 @@ from transformers import (
 import torch
 
 # Local
-from fms_mo import qconfig_init, qmodel_prep, qconfig_load
+from fms_mo import qconfig_init, qmodel_prep
 from fms_mo.fx.utils import model_size_Wb
 from fms_mo.quant.ptq import (
     calibration_llm_1GPU,
@@ -214,7 +214,6 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
         q_file = open('qcfg_llama.json', "r", encoding="utf-8")
         saved_qcfg = json.load(q_file)
         qcfg.update(saved_qcfg)
-        print(qcfg)
         
     qmodel_prep(
         model,
@@ -252,7 +251,6 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
         model.save_pretrained(opt_args.output_dir, use_safetensors=True)
         tokenizer.save_pretrained(opt_args.output_dir)
     else:
-        pass
         from accelerate import load_checkpoint_and_dispatch
         model = load_checkpoint_and_dispatch( model, checkpoint=opt_args.output_dir, device_map=None, no_split_module_classes=['Block'])
 
