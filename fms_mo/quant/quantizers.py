@@ -3029,7 +3029,7 @@ class Qmax(nn.Module):
             self.register_buffer("clip_valn", torch.zeros(perGp[0]))
         else:
             self.register_buffer(
-                "clip_val", torch.zeros(perCh) if perCh else torch.Tensor([1.0])
+                "clip_val", torch.zeros(perCh) if perCh else torch.Tensor([0.0])
             )
             self.register_buffer(
                 "clip_valn", torch.zeros(perCh) if perCh else torch.Tensor([0.0])
