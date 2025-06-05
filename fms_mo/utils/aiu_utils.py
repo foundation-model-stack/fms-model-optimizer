@@ -226,11 +226,10 @@ def recompute_weight_with_sawb(
                         f"-> {weight_int_sawb_as_fp_std:.1f}) "
                         f"and clips of {layer_name + '.weight'}"
                     )
-    else:
+    elif verbose:
         log_min_std = "min_" if weight_per_channel else ""
         log_w_std = weight_int_std_min if weight_per_channel else weight_int_std
-        if verbose:
-            logger.info(f"  Weights preserved ({log_min_std}std={log_w_std:.1f})")
+        logger.info(f"  Weights preserved ({log_min_std}std={log_w_std:.1f})")
 
     return weight_int_sawb, is_w_recomputed
 
