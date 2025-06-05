@@ -13,7 +13,6 @@
 # limitations under the License.
 
 # Standard
-from copy import deepcopy
 from pathlib import Path
 import logging
 
@@ -136,6 +135,9 @@ def recompute_weight_with_sawb(
     integer domain.
     """
 
+    weight_pre_quant = weight_pre_quant.to("cpu")
+    weight_int_as_fp = weight_int_as_fp.to("cpu")
+
     is_w_recomputed = False
     weight_int_sawb: torch.Tensor | None = None
     weight_int_std: torch.Tensor | float | None = None
@@ -169,6 +171,7 @@ def recompute_weight_with_sawb(
         # some SAWB quantizers only process FP32 inputs, so weights are
         # temporarily upscaled
         weight_int_sawb = quantizer(weight_pre_quant.to(torch.float32))
+        assert weight_int_sawb is not None
 
         # 2. Recompute clip values using new SAWB quantizer
         w_cv_key = layer_name + ".quantize_weight.clip_val"
@@ -180,14 +183,33 @@ def recompute_weight_with_sawb(
             logger.info(
                 f"  {'Overwrite' if w_cvn_key in new_sd else 'Add'} key: {w_cvn_key}"
             )
-        new_sd[w_cv_key] = quantizer.clip_val.to("cpu").to(torch.float16)
-        new_sd[w_cvn_key] = -quantizer.clip_val.to("cpu").to(torch.float16)
+
+        cv_sawb = quantizer.clip_val.to("cpu").to(torch.float16)
+        if weight_per_channel:
+            # Select SAWB rows only where clip value does not exceed row max
+            cv_max = weight_pre_quant.abs().max(dim=-1)[0]
+            weight_int_guarded = torch.where(
+                (cv_sawb < cv_max)[:, None],
+                weight_int_sawb,
+                weight_int_as_fp,
+            )
+            cv_guarded = torch.where(cv_sawb < cv_max, cv_sawb, cv_max)
+            weight_int_sawb = weight_int_guarded
+        else:
+            cv_max = weight_pre_quant.abs().max()
+            weight_int_guarded = (
+                weight_int_sawb if cv_sawb < cv_max else weight_int_as_fp
+            )
+            cv_guarded = torch.min(cv_sawb, cv_max)
+
+        new_sd[w_cv_key] = cv_guarded
+        new_sd[w_cvn_key] = -cv_guarded
 
         # 3. [optional] Recompute standard deviation of integer weights
         if verbose:
-            weight_int_sawb_as_fp = deepcopy(weight_int_sawb).to(torch.float32)
+            weight_int_sawb_as_fp = weight_int_guarded.to(torch.float32)
             if weight_per_channel:
-                weight_int_sawb_std_min = weight_int_sawb_as_fp.std(dim=-1)[0].min()
+                weight_int_sawb_std_min = weight_int_sawb_as_fp.std(dim=-1).min()
                 if verbose:
                     logger.info(
                         "  Reprocessed weights "
@@ -204,11 +226,11 @@ def recompute_weight_with_sawb(
                         f"-> {weight_int_sawb_as_fp_std:.1f}) "
                         f"and clips of {layer_name + '.weight'}"
                     )
-        else:
-            log_min_std = "min_" if weight_per_channel else ""
-            log_w_std = weight_int_std_min if weight_per_channel else weight_int_std
-            if verbose:
-                logger.info(f"  Weights preserved ({log_min_std}std={log_w_std:.1f})")
+    else:
+        log_min_std = "min_" if weight_per_channel else ""
+        log_w_std = weight_int_std_min if weight_per_channel else weight_int_std
+        if verbose:
+            logger.info(f"  Weights preserved ({log_min_std}std={log_w_std:.1f})")
 
     return weight_int_sawb, is_w_recomputed
 
