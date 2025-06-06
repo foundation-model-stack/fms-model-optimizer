@@ -6,7 +6,7 @@ import torch
 from fms_mo import qmodel_prep
 from fms_mo.utils.import_utils import available_packages
 from fms_mo.utils.qconfig_utils import check_config, set_mx_specs
-from tests.models.test_model_utils import delete_config, qmodule_error
+from tests.models.test_model_utils import delete_file, qmodule_error
 
 if available_packages["mx"]:
     # Local
@@ -18,6 +18,15 @@ if available_packages["mx"]:
         QLinearMX,
         QBmmMX,
     ]
+
+
+@pytest.fixture(autouse=True)
+def delete_files():
+    """
+    Delete any known files lingering before starting test
+    """
+    delete_file("qcfg.json")
+
 
 @pytest.mark.skipif(
     not available_packages["mx"],
@@ -42,7 +51,7 @@ def test_config_mx_specs_error(
     assert "mx_specs" in config_fp32_mx_specs
     mx_specs_temp = config_fp32_mx_specs.get("mx_specs")
 
-    for key,bad_val in bad_mx_specs_settings:
+    for key, bad_val in bad_mx_specs_settings:
         # Every time we change the value, we must reset mx_specs
         config_fp32_mx_specs["mx_specs"][key] = bad_val
         set_mx_specs(config_fp32_mx_specs)
@@ -52,6 +61,7 @@ def test_config_mx_specs_error(
 
         # Reset to saved value
         config_fp32_mx_specs["mx_specs"] = mx_specs_temp
+
 
 @pytest.mark.skipif(
     not available_packages["mx"],
@@ -75,7 +85,12 @@ def test_config_mx_error(
 
     assert "mx_specs" not in config_fp32_mx
 
-    for config_key, mx_specs_key, config_bad_val, mx_specs_bad_val in bad_mx_config_settings:
+    for (
+        config_key,
+        mx_specs_key,
+        config_bad_val,
+        mx_specs_bad_val,
+    ) in bad_mx_config_settings:
         # Second check config w/ "mx_" prefix
         mx_temp = config_fp32_mx[config_key]
 
@@ -95,8 +110,7 @@ def test_config_mx_error(
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available()
-    or not available_packages["mx"],
+    not torch.cuda.is_available() or not available_packages["mx"],
     reason="Skipped because CUDA or MX library was not available",
 )
 def test_residualMLP(
@@ -115,19 +129,21 @@ def test_residualMLP(
         mx_format (str): MX format for quantization.
     """
     # Remove any saved qcfg.json
-    delete_config()
+    delete_file()
 
     config_fp32_mx_specs["mx_specs"]["w_elem_format"] = mx_format
     config_fp32_mx_specs["mx_specs"]["a_elem_format"] = mx_format
     set_mx_specs(config_fp32_mx_specs)
 
-    qmodel_prep(model_residualMLP, input_residualMLP, config_fp32_mx_specs, use_dynamo=True)
+    qmodel_prep(
+        model_residualMLP, input_residualMLP, config_fp32_mx_specs, use_dynamo=True
+    )
     qmodule_error(model_residualMLP, 2, 1)
 
     # One layer should be QLinearMX
     found_qmodule_mx = False
     for _, module in model_residualMLP.named_modules():
-        if any( isinstance(module, qmodule_mx) for qmodule_mx in mx_qmodules ):
+        if any(isinstance(module, qmodule_mx) for qmodule_mx in mx_qmodules):
             found_qmodule_mx = True
             # Check that the desired mx format was propagated to class
             assert module.mx_specs["w_elem_format"] == mx_format

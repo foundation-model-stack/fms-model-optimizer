@@ -816,8 +816,7 @@ def qconfig_save(
 
     # Save config as json
     if os.path.isfile(fname):
-        message = f"{fname} already exist, will overwrite."
-        warnings.warn(message, UserWarning)
+        logger.info(f"{fname} already exist, will overwrite.")
     with open(fname, "w", encoding="utf-8") as outfile:
         json.dump(temp_qcfg, outfile, indent=4)
 

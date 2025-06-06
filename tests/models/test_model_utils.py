@@ -140,9 +140,9 @@ def qmodule_error(
 ###############################
 
 
-def delete_config(file_path: str = "qcfg.json"):
+def delete_file(file_path: str = "qcfg.json"):
     """
-    Delete a qconfig at the file path provided
+    Delete a file at the file path provided
 
     Args:
         file_path (str, optional): Qconfig file to delete. Defaults to "qcfg.json".
@@ -168,6 +168,7 @@ def load_json(file_path: str = "qcfg.json"):
     assert json_file is not None, f"JSON at {file_path} was not found"
     return json_file
 
+
 def save_json(data, file_path: str = "qcfg.json"):
     """
     Save data object to json file
@@ -178,6 +179,7 @@ def save_json(data, file_path: str = "qcfg.json"):
     """
     with open(file_path, "w", encoding="utf-8") as outfile:
         json.dump(data, outfile, indent=4)
+
 
 def save_serialized_json(config: dict, file_path: str = "qcfg.json"):
     """
@@ -195,3 +197,45 @@ def save_serialized_json(config: dict, file_path: str = "qcfg.json"):
 
     serialize_config(config)  # Only remove stuff necessary to dump
     save_json(config, file_path)
+
+
+################################
+# General state dict functions #
+################################
+
+
+def load_state_dict(fname: str = "qmodel_for_aiu.pt") -> dict:
+    """
+    Load a model state dict .pt file.
+
+    Args:
+        fname (str, optional): File for state dict of model. Defaults to "qmodel_for_aiu.pt".
+
+    Returns:
+        dict: Model state dictionary
+    """
+    return torch.load(fname, weights_only=True)
+
+
+def check_linear_dtypes(state_dict: dict, linear_names: list):
+    """
+    Checks a state dict for proper dtypes of linear names saved for AIU
+
+    Args:
+        state_dict (dict): Saved model state dict
+        linear_names (list): List of layer names that correspond to torch.nn.Linear layers
+    """
+    assert state_dict is not None
+
+    for k, v in state_dict.items():
+        # If k is a quantized layer, check weighs (int8), zero_point(fp32)
+        if any(n in k for n in linear_names):
+            if k.endswith(".weight"):
+                assert v.dtype == torch.int8
+            elif k.endswith(".zero_point"):
+                assert v.dtype == torch.float32
+            else:
+                assert v.dtype == torch.float16
+        else:
+            # Everything else should be fp16
+            assert v.dtype == torch.float16

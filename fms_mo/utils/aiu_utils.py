@@ -232,6 +232,14 @@ def process_weight(
     is_w_recomputed = False
     if layer_name + ".quantize_weight.clip_val" in model.state_dict():
         w_cv = model.state_dict()[layer_name + ".quantize_weight.clip_val"]
+
+        # Check that clip values are initialized
+        if torch.any(w_cv.isclose(torch.tensor(0.0))):
+            raise ValueError(
+                f"Quantization clip values for {layer_name=} have near-zero values and "
+                "are likely uninitialized."
+            )
+
         if w_cv.numel() > 1:
             w_cv = w_cv.unsqueeze(dim=1)
         weight_int_as_fp = torch.clamp(127 / w_cv * weight_pre_quant, -127, 127).round()

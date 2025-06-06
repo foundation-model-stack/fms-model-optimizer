@@ -20,6 +20,7 @@ Test functionality of quantization workflow on toy models
 from copy import deepcopy
 
 # Third Party
+import pytest
 import torch
 
 # Local
@@ -27,11 +28,19 @@ from fms_mo import qmodel_prep
 from fms_mo.modules.conv import DetQConv2d, QConv2d, QConv2dPTQ, QConv2dPTQv2
 from fms_mo.modules.linear import QLinear
 from tests.models.test_model_utils import (
-    delete_config,
+    delete_file,
     is_qconv2d,
     is_qlinear,
     is_quantized_layer,
 )
+
+
+@pytest.fixture(autouse=True)
+def delete_files():
+    """
+    Delete any known files lingering before starting test
+    """
+    delete_file("qcfg.json")
 
 
 def test_subclass():
@@ -65,8 +74,6 @@ def test_first_layer_unchanged_fp32(
         sample_input_fp32 (torch.FloatTensor): Sample fp32 input for calibration.
         config_fp32 (dict): Config w/ fp32 settings
     """
-    delete_config()
-
     # Grab copy of first layer before quantization
     first_layer = deepcopy(model_fp32.first_layer)
 
@@ -107,8 +114,6 @@ def test_first_layer_unchanged_fp16(
         sample_input_fp16 (torch.FloatTensor): Sample fp16 input for calibration.
         config_fp16 (dict): Config w/ fp16 settings
     """
-    delete_config()
-
     # Grab copy of first layer before quantization
     first_layer = deepcopy(model_fp16.first_layer)
 
@@ -152,8 +157,6 @@ def test_second_layer_quantized_fp32(
         sample_input_fp32 (torch.FloatTensor): Sample fp32 input for calibration.
         config_fp32 (dict): Config w/ fp32 settings
     """
-    delete_config()
-
     if hasattr(model_fp32, "second_layer"):
         # Copy 2nd layer before quantization
         second_layer = deepcopy(model_fp32.second_layer)
@@ -215,8 +218,6 @@ def test_second_layer_quantized_fp16(
         sample_input_fp16 (torch.FloatTensor): Sample fp16 input for calibration.
         config_fp16 (dict): Config w/ fp16 settings
     """
-    delete_config()
-
     if hasattr(model_fp16, "second_layer"):
         # Copy 2nd layer before quantization
         second_layer = deepcopy(model_fp16.second_layer)
@@ -273,8 +274,6 @@ def test_qmodel_prep_output_fp32(
         sample_input_fp32 (torch.FloatTensor): Sample fp32 input for calibration.
         config_fp32 (dict): Config w/ fp32 settings
     """
-    delete_config()
-
     # need to detach to make deepcopy
     original_output = deepcopy(model_fp32(sample_input_fp32).detach())
 
@@ -300,8 +299,6 @@ def test_qmodel_prep_output_fp16(
         sample_input_fp16 (torch.FloatTensor): Sample fp16 input for calibration.
         config_fp16 (dict): Config w/ fp16 settings
     """
-    delete_config()
-
     # need to detach to make deepcopy
     original_output = deepcopy(model_fp16(sample_input_fp16).detach())
     qmodel_prep(model_fp16, sample_input_fp16, config_fp16)
@@ -329,8 +326,6 @@ def test_qmodel_prep_num_bits_output_fp32(
         num_bits_weight_fp32 (int): nbits_w valid for fp32
         config_fp32 (dict): Config w/ fp32 settings
     """
-    delete_config()
-
     # Get model output before quantization
     original_output = deepcopy(model_fp32(sample_input_fp32).detach())
 
@@ -397,8 +392,6 @@ def test_qmodel_prep_num_bits_output_fp16(
         num_bits_weight_fp16 (int): nbits_w valid for fp16
         config_fp16 (dict): Config w/ fp16 settings
     """
-    delete_config()
-
     # Get model output before quantization
     original_output = deepcopy(model_fp16(sample_input_fp16).detach())
 
