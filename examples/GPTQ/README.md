@@ -72,7 +72,7 @@ This end-to-end example utilizes the common set of interfaces provided by `fms_m
 
     ```bash
     lm_eval --model hf \
-            --model_args pretrained="Meta-Llama-3-8B-GPTQ,dtype=float16,gptqmodel=True=True,enforce_eager=True" \
+            --model_args pretrained="Meta-Llama-3-8B-GPTQ,dtype=float16,gptqmodel=True,enforce_eager=True" \
             --tasks lambada_openai \
             --num_fewshot 5 \
             --device cuda:0 \
