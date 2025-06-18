@@ -69,8 +69,10 @@ def test_triton_matmul_fp(mkn, dtype_to_test):
         .to("cuda")
         .to(torch.float)
     )
-    tl_output_no_trun = tl_matmul(a, b).to(torch.float)
-    tl_output_trun_8b = tl_matmul(a, b, chunk_trun_bits=8).to(torch.float)
+    tl_output_no_trun = tl_matmul(a, b, truncate_then_accumulate=False).to(torch.float)
+    tl_output_trun_8b = tl_matmul(
+        a, b, chunk_trun_bits=8, truncate_then_accumulate=False
+    ).to(torch.float)
 
     diff_no_trun = torch_output - tl_output_no_trun
     diff_trun_8b = torch_output - tl_output_trun_8b

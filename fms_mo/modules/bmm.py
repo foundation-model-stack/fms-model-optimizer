@@ -192,7 +192,7 @@ class QBmm(nn.Module):
             torch.Tensor: Output tensor after quantized bmm.
         """
         # pylint: disable = access-member-before-definition
-        if self.calib_counter:
+        if self.calib_counter > 0:
             with torch.no_grad():
                 qm1 = self.quantize_calib_m1(m1)
                 qm2 = self.quantize_calib_m2(m2)

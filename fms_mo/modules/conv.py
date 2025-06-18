@@ -270,7 +270,7 @@ class QConv2d(nn.Conv2d):
             torch.Tensor: Output tensor of shape (batch_size, out_channels, out_height, out_width).
         """
         # pylint: disable = access-member-before-definition
-        if self.calib_counter:
+        if self.calib_counter > 0:
             with torch.no_grad():
                 qinput = self.quantize_calib_feature(x)
                 qweight = self.quantize_calib_weight(self.weight)

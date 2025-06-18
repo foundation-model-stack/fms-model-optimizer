@@ -152,7 +152,9 @@ class Evaluator:
                 model.device
             )
             with torch.no_grad():
-                lm_logits = model(batch, return_dict=True).logits
+                mod_out = model(batch, return_dict=True)
+                # for newer transformers, model output could be simply a tuple
+                lm_logits = getattr(mod_out, "logits", mod_out[0])
             shift_logits = lm_logits[:, :-1, :].contiguous().float()
             shift_labels = self.dataset[:, (i * block_size) : ((i + 1) * block_size)][
                 :, 1:

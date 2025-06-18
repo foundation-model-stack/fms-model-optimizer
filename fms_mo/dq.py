@@ -36,6 +36,9 @@ import torch
 
 # Local
 from fms_mo import qconfig_init, qmodel_prep
+from fms_mo.custom_ext_kernels.utils import (
+    lower_qmodel_triton,  # pylint: disable=unused-import
+)
 from fms_mo.fx.utils import model_size_Wb
 from fms_mo.quant.ptq import (
     calibration_llm_1GPU_v2,
@@ -255,6 +258,15 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
         logger.info(f"Saving quantized model and tokenizer to {opt_args.output_dir}")
         model.save_pretrained(opt_args.output_dir, use_safetensors=True)
         tokenizer.save_pretrained(opt_args.output_dir)
+
+    if fms_mo_args.aiu_sim_triton:
+        lower_qmodel_triton(
+            model,
+            use_dyn_max_act=-1 if qcfg["qa_mode"] == "pertokenmax" else False,
+            max_acc_bits=qcfg.get("max_acc_bits", 32),
+            num_lsb_to_truncate=qcfg.get("lsb_trun_bits", 0),
+            chunk_size=qcfg.get("chunk_size", 1024),
+        )
 
     if fms_mo_args.eval_ppl:
         path_test = Path(data_args.test_data_path)

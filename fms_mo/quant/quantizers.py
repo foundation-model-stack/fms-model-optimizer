@@ -3476,11 +3476,14 @@ class PerTokenMax(nn.Module):
         """
         super().__init__()
         self.num_bits = num_bits
+        self.register_buffer("clip_val", torch.Tensor([0.0]))
+        self.register_buffer("clip_valn", torch.Tensor([0.0]))
 
     def forward(self, input_tensor):
-        scales = input_tensor.abs().max(dim=-1, keepdim=True)[0]
+        self.clip_val = input_tensor.abs().max(dim=-1, keepdim=True)[0]
+        self.clip_valn = -self.clip_val
         levels = 2 ** (self.num_bits - 1) - 1
-        scales.clamp_(min=1e-5).div_(levels)
+        scales = self.clip_val.clamp(min=1e-5).div(levels)
         input_tensor.div_(scales).round_().mul_(scales)
         return input_tensor
 
