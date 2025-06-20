@@ -31,6 +31,7 @@ optional_packages = [
     "pygraphviz",
     "fms",
     "triton",
+    "torchvision",
 ]
 
 available_packages = {}

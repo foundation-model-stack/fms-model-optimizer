@@ -29,6 +29,7 @@ from fms_mo.fx.utils import (
     get_target_op_from_mod_or_str,
     get_target_op_from_node,
 )
+from fms_mo.utils.import_utils import available_packages
 
 logger = logging.getLogger(__name__)
 
@@ -1133,7 +1134,6 @@ def model_analyzer(
     from functools import partial
 
     # Third Party
-    from torchvision.models import VisionTransformer
     from transformers import PreTrainedModel
 
     if issubclass(type(model), torch.nn.Module):
@@ -1145,7 +1145,16 @@ def model_analyzer(
         model_to_be_traced = model
         model_param_size = 999
 
-    is_transformers = issubclass(type(model), (PreTrainedModel, VisionTransformer))
+    transformer_model_classes = (PreTrainedModel,)
+
+    if available_packages["torchvision"]:
+        # Third Party
+        # pylint: disable = import-error
+        from torchvision.models import VisionTransformer
+
+        transformer_model_classes += (VisionTransformer,)
+
+    is_transformers = issubclass(type(model), transformer_model_classes)
     if model_param_size > 1:
         # Standard
         import sys
@@ -1188,11 +1197,13 @@ def model_analyzer(
 
         # only add last layer
         qcfg["qskip_layer_name"] += [qcfg["mod_call_seq"][-1]]
-        # unless it's a ViT, skip first Conv as well
-        if issubclass(type(model), VisionTransformer) and isinstance(
-            model.get_submodule(qcfg["mod_call_seq"][0]), torch.nn.Conv2d
-        ):
-            qcfg["qskip_layer_name"] += [qcfg["mod_call_seq"][0]]
+
+        if available_packages["torchvision"]:
+            # unless it's a ViT, skip first Conv as well
+            if issubclass(type(model), VisionTransformer) and isinstance(
+                model.get_submodule(qcfg["mod_call_seq"][0]), torch.nn.Conv2d
+            ):
+                qcfg["qskip_layer_name"] += [qcfg["mod_call_seq"][0]]
 
     with torch.no_grad():
         model_opt = torch.compile(
@@ -1271,21 +1282,23 @@ def model_analyzer(
     # c) identify RPN/FPN
     # TODO this hack only works for torchvision models. will use find_rpn_fpn_gm()
 
-    # Third Party
-    from torchvision.models.detection.rpn import RegionProposalNetwork
-    from torchvision.ops import FeaturePyramidNetwork
+    if available_packages["torchvision"]:
+        # Third Party
+        # pylint: disable = import-error
+        from torchvision.models.detection.rpn import RegionProposalNetwork
+        from torchvision.ops import FeaturePyramidNetwork
 
-    rpnfpn_prefix = []
-    rpnfpn_convs = []
-    for n, m in model.named_modules():
-        if isinstance(m, (FeaturePyramidNetwork, RegionProposalNetwork)):
-            rpnfpn_prefix.append(n)
-        if isinstance(m, torch.nn.Conv2d) and any(
-            n.startswith(p) for p in rpnfpn_prefix
-        ):
-            rpnfpn_convs.append(n)
-            if n not in qcfg["qskip_layer_name"]:
-                qcfg["qskip_layer_name"].append(n)
+        rpnfpn_prefix = []
+        rpnfpn_convs = []
+        for n, m in model.named_modules():
+            if isinstance(m, (FeaturePyramidNetwork, RegionProposalNetwork)):
+                rpnfpn_prefix.append(n)
+            if isinstance(m, torch.nn.Conv2d) and any(
+                n.startswith(p) for p in rpnfpn_prefix
+            ):
+                rpnfpn_convs.append(n)
+                if n not in qcfg["qskip_layer_name"]:
+                    qcfg["qskip_layer_name"].append(n)
 
     if qcfg["N_backend_called"] > 1:
         logger.warning(

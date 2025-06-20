@@ -19,13 +19,13 @@ Test qmodel_prep functionality on Toy Models, Resnet50, Vision Transformer, and 
 # Third Party
 import pytest
 import torch
-import torchvision
 import transformers
 
 # Local
 # fms_mo imports
 from fms_mo import qconfig_init, qmodel_prep
 from fms_mo.prep import has_quantized_module
+from fms_mo.utils.import_utils import available_packages
 from fms_mo.utils.utils import patch_torch_bmm
 from tests.models.test_model_utils import count_qmodules, delete_file, qmodule_error
 
@@ -159,8 +159,12 @@ def test_config_fp32_qmodes(
 ###########################
 
 
+@pytest.mark.skipif(
+    not available_packages["torchvision"],
+    reason="Requires torchvision",
+)
 def test_resnet50_torchscript(
-    model_resnet: torchvision.models.resnet.ResNet,
+    model_resnet,
     batch_resnet: torch.FloatTensor,
     config_int8: dict,
 ):
@@ -177,8 +181,12 @@ def test_resnet50_torchscript(
     qmodule_error(model_resnet, 6, 48)
 
 
+@pytest.mark.skipif(
+    not available_packages["torchvision"],
+    reason="Requires torchvision",
+)
 def test_resnet50_dynamo(
-    model_resnet: torchvision.models.resnet.ResNet,
+    model_resnet,
     batch_resnet: torch.FloatTensor,
     config_int8: dict,
 ):
@@ -195,8 +203,12 @@ def test_resnet50_dynamo(
     qmodule_error(model_resnet, 6, 48)
 
 
+@pytest.mark.skipif(
+    not available_packages["torchvision"],
+    reason="Requires torchvision",
+)
 def test_resnet50_dynamo_layers(
-    model_resnet: torchvision.models.resnet.ResNet,
+    model_resnet,
     batch_resnet: torch.FloatTensor,
     config_int8: dict,
 ):
@@ -216,8 +228,12 @@ def test_resnet50_dynamo_layers(
 
 
 # Vision Transformer tests
+@pytest.mark.skipif(
+    not available_packages["torchvision"],
+    reason="Requires torchvision",
+)
 def test_vit_torchscript(
-    model_vit: torchvision.models.vision_transformer.VisionTransformer,
+    model_vit,
     batch_vit: torch.FloatTensor,
     config_int8: dict,
 ):
@@ -234,8 +250,12 @@ def test_vit_torchscript(
     qmodule_error(model_vit, 2, 36)
 
 
+@pytest.mark.skipif(
+    not available_packages["torchvision"],
+    reason="Requires torchvision",
+)
 def test_vit_dynamo(
-    model_vit: torchvision.models.vision_transformer.VisionTransformer,
+    model_vit,
     batch_vit: torch.FloatTensor,
     config_int8: dict,
 ):
@@ -250,6 +270,42 @@ def test_vit_dynamo(
     # Run qmodel_prep w/ Dynamo tracer
     qmodel_prep(model_vit, batch_vit, config_int8, use_dynamo=True)
     qmodule_error(model_vit, 2, 36)
+
+
+def test_resnet18(
+    model_resnet18,
+    batch_resnet18,
+    config_int8: dict,
+):
+    """
+    Perform int8 quantization on ResNet-18 w/ Dynamo tracer
+
+    Args:
+        model_resnet18 (AutoModelForImageClassification): Resnet18 model + weights
+        batch_resnet18 (torch.FloatTensor): Batch image data for Resnet18
+        config (dict): Recipe Config w/ int8 settings
+    """
+    # Run qmodel_prep w/ Dynamo tracer
+    qmodel_prep(model_resnet18, batch_resnet18, config_int8, use_dynamo=True)
+    qmodule_error(model_resnet18, 4, 17)
+
+
+def test_vit_base(
+    model_vit_base,
+    batch_vit_base,
+    config_int8: dict,
+):
+    """
+    Perform int8 quantization on ViT-base w/ Dynamo tracer
+
+    Args:
+        model_vit_base (AutoModelForImageClassification): Resnet18 model + weights
+        batch_vit_base (torch.FloatTensor): Batch image data for Resnet18
+        config (dict): Recipe Config w/ int8 settings
+    """
+    # Run qmodel_prep w/ Dynamo tracer
+    qmodel_prep(model_vit_base, batch_vit_base, config_int8, use_dynamo=True)
+    qmodule_error(model_vit_base, 1, 73)
 
 
 def test_bert_dynamo(

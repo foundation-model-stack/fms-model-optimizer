@@ -22,10 +22,11 @@ from copy import deepcopy
 import os
 
 # Third Party
+from PIL import Image  # pylint: disable=import-error
 from torch.utils.data import DataLoader, TensorDataset
-from torchvision.io import read_image
-from torchvision.models import ResNet50_Weights, ViT_B_16_Weights, resnet50, vit_b_16
 from transformers import (
+    AutoImageProcessor,
+    AutoModelForImageClassification,
     BertConfig,
     BertModel,
     BertTokenizer,
@@ -43,6 +44,7 @@ import torch.nn.functional as F
 # fms_mo imports
 from fms_mo import qconfig_init
 from fms_mo.modules import QLSTM, QBmm, QConv2d, QConvTranspose2d, QLinear
+from fms_mo.utils.import_utils import available_packages
 from fms_mo.utils.qconfig_utils import get_mx_specs_defaults, set_mx_specs
 
 ########################
@@ -1123,75 +1125,155 @@ def required_pair(request):
 # Vision Model Fixtures #
 #########################
 
-# Create img
-# downloaded from torchvision github (vision/test/assets/encoder_jpeg/ directory)
-img = read_image(
+
+if available_packages["torchvision"]:
+    # Third Party
+    # pylint: disable = import-error
+    from torchvision.io import read_image
+    from torchvision.models import (
+        ResNet50_Weights,
+        ViT_B_16_Weights,
+        resnet50,
+        vit_b_16,
+    )
+
+    # Create img
+    # downloaded from torchvision github (vision/test/assets/encoder_jpeg/ directory)
+    img_tv = read_image(
+        os.path.realpath(
+            os.path.join(os.path.dirname(__file__), "grace_hopper_517x606.jpg")
+        )
+    )
+
+    # Create resnet/vitbatch fixtures from weights
+    def prepocess_img(image, weights):
+        """
+        Preprocess an image w/ a weights.transform()
+
+        Args:
+            img_tv (torch.FloatTensor): Image data
+            weights (torchvision.models): Weight object
+
+        Returns:
+            torch.FloatTensor: Preprocessed image
+        """
+        preprocess = weights.transforms()
+        batch = preprocess(image).unsqueeze(0)
+        return batch
+
+    @pytest.fixture(scope="session")
+    def batch_resnet():
+        """
+        Preprocess an image w/ Resnet weights.transform()
+
+        Returns:
+            torch.FloatTensor: Preprocessed image
+        """
+        return prepocess_img(img_tv, ResNet50_Weights.IMAGENET1K_V2)
+
+    @pytest.fixture(scope="session")
+    def batch_vit():
+        """
+        Preprocess an image w/ ViT weights.transform()
+
+        Returns:
+            torch.FloatTensor: Preprocessed image
+        """
+        return prepocess_img(img_tv, ViT_B_16_Weights.IMAGENET1K_V1)
+
+    # Create resnet/vit model fixtures from weights
+    @pytest.fixture(scope="function")
+    def model_resnet():
+        """
+        Create Resnet50 model + weights
+
+        Returns:
+            torchvision.models.resnet.ResNet: Resnet50 model
+        """
+        return resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
+
+    @pytest.fixture(scope="function")
+    def model_vit():
+        """
+        Create ViT model + weights
+
+        Returns:
+            torchvision.models.vision_transformer.VisionTransformer: ViT model
+        """
+        return vit_b_16(weights=ViT_B_16_Weights.IMAGENET1K_V1)
+
+
+img = Image.open(
     os.path.realpath(
         os.path.join(os.path.dirname(__file__), "grace_hopper_517x606.jpg")
     )
-)
+).convert("RGB")
 
 
-# Create resnet/vit batch fixtures from weights
-def prepocess_img(image, weights):
+def process_img(
+    pretrained_model: str,
+    input_img: Image.Image,
+):
     """
-    Preprocess an image w/ a weights.transform()
+    Process an image w/ AutoImageProcessor
 
     Args:
-        img (torch.FloatTensor): Image data
-        weights (torchvision.models): Weight object
+        processor (AutoImageProcessor): Processor weights for pretrained model
+        pretrained_model (str): Weight object
+        input_img (Image.Image): Image data
 
     Returns:
-        torch.FloatTensor: Preprocessed image
+        torch.FloatTensor: Processed image
     """
-    preprocess = weights.transforms()
-    batch = preprocess(image).unsqueeze(0)
-    return batch
-
-
-@pytest.fixture(scope="session")
-def batch_resnet():
-    """
-    Preprocess an image w/ Resnet weights.transform()
-
-    Returns:
-        torch.FloatTensor: Preprocessed image
-    """
-    return prepocess_img(img, ResNet50_Weights.IMAGENET1K_V2)
-
-
-@pytest.fixture(scope="session")
-def batch_vit():
-    """
-    Preprocess an image w/ ViT weights.transform()
-
-    Returns:
-        torch.FloatTensor: Preprocessed image
-    """
-    return prepocess_img(img, ViT_B_16_Weights.IMAGENET1K_V1)
-
-
-# Create resnet/vit model fixtures from weights
-@pytest.fixture(scope="function")
-def model_resnet():
-    """
-    Create Resnet50 model + weights
-
-    Returns:
-        torchvision.models.resnet.ResNet: Resnet50 model
-    """
-    return resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
+    img_processor = AutoImageProcessor.from_pretrained(pretrained_model, use_fast=True)
+    batch_dict = img_processor(images=input_img, return_tensors="pt")
+    return batch_dict["pixel_values"]
 
 
 @pytest.fixture(scope="function")
-def model_vit():
+def batch_resnet18():
     """
-    Create ViT model + weights
+    Preprocess an image w/ ms resnet18 processor
 
     Returns:
-        torchvision.models.vision_transformer.VisionTransformer: ViT model
+        torch.FloatTensor: Preprocessed image
     """
-    return vit_b_16(weights=ViT_B_16_Weights.IMAGENET1K_V1)
+    return process_img("microsoft/resnet-18", img)
+
+
+@pytest.fixture(scope="function")
+def model_resnet18():
+    """
+    Create MS ResNet18 model + weights
+
+    Returns:
+        AutoModelForImageClassification: Resnet18 model
+    """
+    return AutoModelForImageClassification.from_pretrained("microsoft/resnet-18")
+
+
+@pytest.fixture(scope="function")
+def batch_vit_base():
+    """
+    Preprocess an image w/ Google ViT-base processor
+
+    Returns:
+        torch.FloatTensor: Preprocessed image
+    """
+    return process_img("google/vit-base-patch16-224", img)
+
+
+@pytest.fixture(scope="function")
+def model_vit_base():
+    """
+    Create Google ViT-base model + weights
+
+    Returns:
+        AutoModelForImageClassification: Google ViT-base model
+    """
+    return AutoModelForImageClassification.from_pretrained(
+        "google/vit-base-patch16-224"
+    )
 
 
 #######################
