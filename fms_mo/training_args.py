@@ -55,6 +55,17 @@ class ModelArguments(TypeChecker):
     """Dataclass for model related arguments."""
 
     model_name_or_path: str = field(default="facebook/opt-125m")
+    task_type: str = field(
+        default="lm",
+        metadata={
+            "choices": ["lm", "qa", "mlm"],
+            "help": (
+                "Instantiate model for selected task: 'lm' (language modeling), 'qa' "
+                "(question answering, for encoders), 'mlm' (masked language modeling, "
+                "for encoders)."
+            ),
+        },
+    )
     torch_dtype: str = field(default="bfloat16")
     device_map: Optional[str] = field(
         default=None,

@@ -36,7 +36,11 @@ import traceback
 from datasets import load_from_disk
 from huggingface_hub.errors import HFValidationError
 from torch.cuda import OutOfMemoryError
-from transformers import AutoTokenizer
+from transformers import (
+    AutoModelForMaskedLM,
+    AutoModelForQuestionAnswering,
+    AutoTokenizer,
+)
 import torch
 import transformers
 
@@ -204,9 +208,23 @@ def run_fp8(model_args, data_args, opt_args, fp8_args):
 
     logger = set_log_level(opt_args.log_level, "fms_mo.run_fp8")
 
-    model = SparseAutoModelForCausalLM.from_pretrained(
-        model_args.model_name_or_path, torch_dtype=model_args.torch_dtype
-    )
+    if model_args.task_type == "lm":
+        model = SparseAutoModelForCausalLM.from_pretrained(
+            model_args.model_name_or_path,
+            torch_dtype=model_args.torch_dtype,
+        )
+    elif model_args.task_type == "qa":
+        model = AutoModelForQuestionAnswering.from_pretrained(
+            model_args.model_name_or_path,
+            torch_dtype=model_args.torch_dtype,
+        )
+    elif model_args.task_type == "mlm":
+        model = AutoModelForMaskedLM.from_pretrained(
+            model_args.model_name_or_path,
+            torch_dtype=model_args.torch_dtype,
+        )
+    else:
+        raise ValueError(f"Unsupported task: {model_args.task_type}")
     tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
 
     recipe = QuantizationModifier(
