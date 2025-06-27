@@ -20,6 +20,7 @@ Test qconfig_save functionality
 import pytest
 
 # Local
+from fms_mo import qconfig_init
 from fms_mo.utils.qconfig_utils import qconfig_load, qconfig_save
 from tests.models.test_model_utils import (
     delete_file,
@@ -298,3 +299,31 @@ def test_load_config_required_pair(
 
     loaded_config = qconfig_load("qcfg.json")
     assert loaded_config.get(key) == default_val
+
+
+def test_save_init_recipe(
+    config_int8: dict,
+):
+    """
+    Change a config, save it,
+
+    Args:
+        config_fp32 (dict): Config for fp32 quantization
+    """
+    # Change some elements of config to ensure its being saved/loaded properly
+    config_int8["qa_mode"] = "minmax"
+    config_int8["qa_mode"] = "pertokenmax"
+    config_int8["qmodel_calibration"] = 17
+    config_int8["qskip_layer_name"] = ["lm_head"]
+
+    qconfig_save(config_int8)
+    recipe_config = qconfig_init(recipe="qcfg.json")
+
+    # Remove date field from recipe_config - only added at save
+    del recipe_config["date"]
+
+    assert len(recipe_config) == len(config_int8)
+
+    for key, val in config_int8.items():
+        assert key in recipe_config
+        assert recipe_config.get(key) == val

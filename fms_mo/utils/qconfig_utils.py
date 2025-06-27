@@ -713,36 +713,43 @@ def remove_unwanted_from_config(
     return config, dump
 
 
-def get_unwanted_defaults() -> dict:
+def get_unserializable_defaults() -> dict:
     """Add back those unserializable items if needed"""
-    unwanted_items = [
-        ("sweep_cv_percentile", False),
-        ("tb_writer", None),
-        (
-            "mapping",
-            {
-                nn.Conv2d: QConv2d,
-                nn.ConvTranspose2d: QConvTranspose2d,
-                nn.Linear: QLinear,
-                nn.LSTM: QLSTM,
-                "matmul_or_bmm": QBmm,
-            },
-        ),
-        ("checkQerr_frequency", False),
-        ("newlySwappedModules", []),
-        ("force_calib_once", False),
+    unserializable_items = {
+        "sweep_cv_percentile": False,
+        "tb_writer": None,
+        "mapping": {
+            nn.Conv2d: QConv2d,
+            nn.ConvTranspose2d: QConvTranspose2d,
+            nn.Linear: QLinear,
+            nn.LSTM: QLSTM,
+            "matmul_or_bmm": QBmm,
+        },
+        "checkQerr_frequency": False,
+        "newlySwappedModules": [],
+        "force_calib_once": False,
         # if we keep the follwing LUTs, it will save the entire model
-        ("LUTmodule_name", {}),
-    ]
-    return unwanted_items
+        "LUTmodule_name": {},
+    }
+    return unserializable_items
+
+
+def add_if_not_present(config: dict, items_to_add: dict) -> None:
+    """
+    Add items to config dict only if they aren't present
+
+    Args:
+        config (dict): Quantized config
+        items_to_add (dict): Items that will be added if not present in config
+    """
+    for key, val in items_to_add.items():
+        if key not in config:
+            config[key] = val
 
 
 def add_required_defaults_to_config(config: dict) -> None:
     """Recover "unserializable" items that are previously removed from config"""
-    unwanted_items = get_unwanted_defaults()
-    for key, default_val in unwanted_items:
-        if key not in config:
-            config[key] = default_val
+    add_if_not_present(config, get_unserializable_defaults())
 
 
 def add_wanted_defaults_to_config(config: dict, minimal: bool = True) -> None:
@@ -750,7 +757,7 @@ def add_wanted_defaults_to_config(config: dict, minimal: bool = True) -> None:
     if a wanted item is not in the config, add it w/ default value
     """
     if not minimal:
-        config.update(config_defaults())
+        add_if_not_present(config, config_defaults())
 
 
 def qconfig_save(
