@@ -143,6 +143,8 @@ def run_gptq(model_args, data_args, opt_args, gptq_args):
         group_size=gptq_args.group_size,
         desc_act=gptq_args.desc_act,
         damp_percent=gptq_args.damp_percent,
+        v2=gptq_args.use_version2,
+        v2_memory_device=gptq_args.v2_mem_device,
     )
 
     # Add custom model_type mapping to gptqmodel LUT so GPTQModel can recognize them.
