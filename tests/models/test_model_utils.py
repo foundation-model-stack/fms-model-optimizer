@@ -26,9 +26,9 @@ from torch.nn import Conv2d, Linear
 import torch
 
 # Local
-from fms_mo.modules.bmm import QBmm
-from fms_mo.modules.conv import DetQConv2d, QConv2d, QConv2dPTQ, QConv2dPTQv2
-from fms_mo.modules.linear import QLinear
+from fms_mo.modules.conv import isinstance_qconv2d
+from fms_mo.modules.linear import isinstance_qlinear
+from fms_mo.prep import quantized_modules
 from fms_mo.utils.qconfig_utils import serialize_config
 
 logger = logging.getLogger(__name__)
@@ -36,11 +36,6 @@ logger = logging.getLogger(__name__)
 ####################
 # Helper Functions #
 ####################
-
-qconv2d_nodes = (QConv2d, QConv2dPTQ, QConv2dPTQv2, DetQConv2d)
-qlinear_nodes = QLinear
-
-quantized_nodes = (QConv2d, QConv2dPTQ, QConv2dPTQv2, QLinear, DetQConv2d)
 
 
 def is_qconv2d(node: torch.nn.Module):
@@ -53,7 +48,7 @@ def is_qconv2d(node: torch.nn.Module):
     Returns:
         bool: If node is in qconv2d_nodes
     """
-    return isinstance(node, qconv2d_nodes)
+    return isinstance_qconv2d(node)
 
 
 def is_qlinear(node: torch.nn.Module):
@@ -66,7 +61,7 @@ def is_qlinear(node: torch.nn.Module):
     Returns:
         bool: If node is in qlinear_nodes
     """
-    return isinstance(node, qlinear_nodes)
+    return isinstance_qlinear(node)
 
 
 def is_quantized_layer(node: torch.nn.Module):
@@ -79,7 +74,7 @@ def is_quantized_layer(node: torch.nn.Module):
     Returns:
         bool: If node is in quantized_nodes
     """
-    return isinstance(node, quantized_nodes)
+    return isinstance(node, quantized_modules)
 
 
 #########################
@@ -100,7 +95,7 @@ def count_qmodules(model: torch.nn.Module):
     """
     torch_modules, fms_qmodules = [], []
     for n, m in model.named_modules():
-        if isinstance(m, (QConv2d, QLinear, QBmm)):
+        if is_quantized_layer(m):
             fms_qmodules.append((n, m))
         elif isinstance(m, (Conv2d, Linear)):
             torch_modules.append((n, m))
@@ -145,9 +140,9 @@ def qmodule_error(
 ###############################
 
 
-def delete_config(file_path: str = "qcfg.json"):
+def delete_file(file_path: str = "qcfg.json"):
     """
-    Delete a qconfig at the file path provided
+    Delete a file at the file path provided
 
     Args:
         file_path (str, optional): Qconfig file to delete. Defaults to "qcfg.json".
@@ -174,6 +169,18 @@ def load_json(file_path: str = "qcfg.json"):
     return json_file
 
 
+def save_json(data, file_path: str = "qcfg.json"):
+    """
+    Save data object to json file
+
+    Args:
+        data (_type_): _description_
+        file_path (str, optional): _description_. Defaults to "qcfg.json".
+    """
+    with open(file_path, "w", encoding="utf-8") as outfile:
+        json.dump(data, outfile, indent=4)
+
+
 def save_serialized_json(config: dict, file_path: str = "qcfg.json"):
     """
     Save qconfig by serializing it first
@@ -189,5 +196,46 @@ def save_serialized_json(config: dict, file_path: str = "qcfg.json"):
             del config[key]
 
     serialize_config(config)  # Only remove stuff necessary to dump
-    with open(file_path, "w", encoding="utf-8") as outfile:
-        json.dump(config, outfile, indent=4)
+    save_json(config, file_path)
+
+
+################################
+# General state dict functions #
+################################
+
+
+def load_state_dict(fname: str = "qmodel_for_aiu.pt") -> dict:
+    """
+    Load a model state dict .pt file.
+
+    Args:
+        fname (str, optional): File for state dict of model. Defaults to "qmodel_for_aiu.pt".
+
+    Returns:
+        dict: Model state dictionary
+    """
+    return torch.load(fname, weights_only=True)
+
+
+def check_linear_dtypes(state_dict: dict, linear_names: list):
+    """
+    Checks a state dict for proper dtypes of linear names saved for AIU
+
+    Args:
+        state_dict (dict): Saved model state dict
+        linear_names (list): List of layer names that correspond to torch.nn.Linear layers
+    """
+    assert state_dict is not None
+
+    for k, v in state_dict.items():
+        # If k is a quantized layer, check weighs (int8), zero_point(fp32)
+        if any(n in k for n in linear_names):
+            if k.endswith(".weight"):
+                assert v.dtype == torch.int8
+            elif k.endswith(".zero_point") or k.endswith(".zero_shift"):
+                assert v.dtype == torch.float32
+            else:
+                assert v.dtype == torch.float16
+        else:
+            # Everything else should be fp16
+            assert v.dtype == torch.float16

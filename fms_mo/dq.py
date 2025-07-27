@@ -36,13 +36,17 @@ import torch
 
 # Local
 from fms_mo import qconfig_init, qmodel_prep
+from fms_mo.custom_ext_kernels.utils import (
+    lower_qmodel_triton,  # pylint: disable=unused-import
+)
 from fms_mo.fx.utils import model_size_Wb
 from fms_mo.quant.ptq import (
-    calibration_llm_1GPU,
+    calibration_llm_1GPU_v2,
     dq_llm,
     get_act_scales,
     get_act_scales_1gpu,
 )
+from fms_mo.utils.aiu_utils import save_for_aiu
 from fms_mo.utils.dq_utils import config_quantize_smooth_layers
 from fms_mo.utils.eval_utils import Evaluator, eval_llm_1GPU
 from fms_mo.utils.utils import patch_torch_bmm, prepare_input
@@ -157,22 +161,22 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
     # config layers to skip, smooth scale
     config_quantize_smooth_layers(qcfg)
 
+    use_dynamo = True
+    # use dynamo as default unless really needed, False -> fallback to TorchScript tracing
     if any(x != 32 for x in attn_bits):
-        logger.info("Quantize attention bmms or kvcache, use dynamo for prep")
+        logger.info("Quantize attention bmms or kvcache, will use dynamo for prep")
         use_layer_name_pattern_matching = False
         qcfg["qlayer_name_pattern"] = []
         assert (
             qcfg["qlayer_name_pattern"] == []
         ), "ensure nothing in qlayer_name_pattern when use dynamo"
-        use_dynamo = True
     else:
-        logger.info("Do not quantize attention bmms")
+        logger.info("Attention bmms will not be quantized.")
         use_layer_name_pattern_matching = True
-        use_dynamo = False
 
     qcfg["seq_len"] = block_size
     qcfg["model"] = model_args.model_name_or_path
-    qcfg["smoothq"] = True
+    qcfg["smoothq"] = qcfg.get("smoothq_alpha", -1) >= 0 and "mx_specs" not in qcfg
     qcfg["plotsvg"] = False
 
     calibration_dataset = load_from_disk(data_args.training_data_path)
@@ -186,47 +190,56 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
     )
 
     # For loading or creating smoothquant scale. Sometimes we may include scales in ckpt as well.
-    scale_file = Path(f"./act_scales/{qcfg['model'].replace('/', '-')}.pt")
-    if qcfg.get("act_scale_path", None):
-        # user provided a scale file (or a dir)
-        scale_file_or_dir = Path(qcfg["act_scale_path"])
-        if scale_file_or_dir.is_dir():
-            scale_file = scale_file_or_dir / f"{qcfg['model'].replace('/', '-')}.pt"
-        elif scale_file_or_dir.is_file():
-            scale_file = scale_file_or_dir
+    if qcfg["smoothq"]:
+        scale_file = Path(f"./act_scales/{qcfg['model'].replace('/', '-')}.pt")
+        if qcfg.get("act_scale_path", None):
+            # user provided a scale file (or a dir)
+            scale_file_or_dir = Path(qcfg["act_scale_path"])
+            if scale_file_or_dir.is_dir():
+                scale_file = scale_file_or_dir / f"{qcfg['model'].replace('/', '-')}.pt"
+            elif scale_file_or_dir.is_file():
+                scale_file = scale_file_or_dir
 
-    if not scale_file.parent.exists():
-        scale_file.parent.mkdir(exist_ok=False)
+        if not scale_file.parent.exists():
+            scale_file.parent.mkdir(exist_ok=False)
 
-    if scale_file.exists():
-        act_scales = torch.load(scale_file, map_location=getattr(model, "device", dev))
-    else:
-        logger.info("Generate activation scales")
-        if qcfg["large_model"]:
-            act_scales = get_act_scales_1gpu(model, dq_dataloader, qcfg)
+        if scale_file.exists():
+            act_scales = torch.load(
+                scale_file, map_location=getattr(model, "device", dev)
+            )
+
         else:
-            act_scales = get_act_scales(model, dq_dataloader, qcfg)
-        torch.save(act_scales, scale_file)
-    qmodel_prep(
-        model,
-        dq_dataloader,
-        qcfg,
-        use_layer_name_pattern_matching=use_layer_name_pattern_matching,
-        use_dynamo=use_dynamo,
-        dev=dev,
-        save_fname="dq",
-    )
-    logger.info(f"Quantized model {model}")
-    logger.info("Starting to apply smooth scale")
-    dq_llm(model, act_scales, qcfg)
-    logger.info("Finished applying smooth scale")
-    logger.info("==" * 20)
+            logger.info("Generate activation scales")
+            if qcfg["large_model"]:
+                act_scales = get_act_scales_1gpu(model, dq_dataloader, qcfg)
+            else:
+                act_scales = get_act_scales(model, dq_dataloader, qcfg)
+            torch.save(act_scales, scale_file)
+
+    if fms_mo_args.aiu_sim_triton != "fp8":
+        qmodel_prep(
+            model,
+            dq_dataloader,
+            qcfg,
+            use_layer_name_pattern_matching=use_layer_name_pattern_matching,
+            use_dynamo=use_dynamo,
+            dev=dev,
+            save_fname="dq",
+        )
+        logger.info(f"Quantized model {model}")
+        logger.info("==" * 20)
+
+    if qcfg["smoothq"]:
+        logger.info("Starting to apply smooth scale")
+        dq_llm(model, act_scales, qcfg)
+        logger.info("Finished applying smooth scale")
+
     if qcfg["qmodel_calibration_new"] > 0:
         logger.info("Starting to calibrate activation clip_val")
         if qcfg["large_model"]:
-            calibration_llm_1GPU(qcfg, model, dq_dataloader)
+            calibration_llm_1GPU_v2(qcfg, model, dq_dataloader)
         else:
-            model.to("cuda:0")
+            model.to("cuda")
             pbar = tqdm(
                 dq_dataloader,
                 desc=" calibration after applying smoothq scale and before inference",
@@ -237,9 +250,27 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
                 with patch_torch_bmm(qcfg):
                     model(**data_mb)
 
-    logger.info(f"Saving quantized model and tokenizer to {opt_args.output_dir}")
-    model.save_pretrained(opt_args.output_dir, use_safetensors=True)
-    tokenizer.save_pretrained(opt_args.output_dir)
+    if opt_args.save_ckpt_for_aiu:
+        logger.info(
+            f"Saving model processed for AIU and tokenizer to {opt_args.output_dir}"
+        )
+        save_for_aiu(model, qcfg, output_dir=opt_args.output_dir, verbose=True)
+    elif opt_args.save_ckpt:
+        logger.info(f"Saving quantized model and tokenizer to {opt_args.output_dir}")
+        model.save_pretrained(opt_args.output_dir, use_safetensors=True)
+        tokenizer.save_pretrained(opt_args.output_dir)
+
+    if fms_mo_args.aiu_sim_triton:
+        # NOTE plz apply correct HW settings here, defaults are not real HW params
+        lower_qmodel_triton(
+            model,
+            use_dyn_max_act=-1 if qcfg["qa_mode"] == "pertokenmax" else False,
+            max_acc_bits=qcfg.get("max_acc_bits", 32),
+            num_lsb_to_truncate=qcfg.get("lsb_trun_bits", 0),
+            chunk_size=qcfg.get("chunk_size", 32),  # 1024
+            clamp_acc_to_dl16=fms_mo_args.aiu_sim_triton == "fp8",
+            # layer_to_exclude=["lm_head",]
+        )
 
     if fms_mo_args.eval_ppl:
         path_test = Path(data_args.test_data_path)
@@ -249,7 +280,7 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
             test_dataset = load_from_disk(data_args.test_data_path)
             test_dataset = test_dataset.with_format("torch")
         elif len(pt_files) > 0:
-            test_dataset = torch.load(pt_files[0])
+            test_dataset = torch.load(pt_files[0], weights_only=False)
 
         logger.info(f"Model for evaluation: {model}")
         if qcfg["large_model"]:
@@ -258,7 +289,8 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
             model.to(torch.device("cuda:0"))
             n_samples = int(test_dataset.input_ids.shape[1] / block_size)
             evaluator = Evaluator(test_dataset, "cuda", n_samples=n_samples)
-            ppl = evaluator.evaluate(model, block_size=block_size)
+            with patch_torch_bmm(qcfg):
+                ppl = evaluator.evaluate(model, block_size=block_size)
             logger.info(f"Model perplexity: {ppl}")
         logger.info("-" * 50)
         logger.info("Finished evaluation")

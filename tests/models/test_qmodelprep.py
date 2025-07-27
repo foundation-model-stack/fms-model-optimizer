@@ -19,15 +19,24 @@ Test qmodel_prep functionality on Toy Models, Resnet50, Vision Transformer, and 
 # Third Party
 import pytest
 import torch
-import torchvision
 import transformers
 
 # Local
 # fms_mo imports
-from fms_mo import qmodel_prep
+from fms_mo import qconfig_init, qmodel_prep
 from fms_mo.prep import has_quantized_module
+from fms_mo.utils.import_utils import available_packages
 from fms_mo.utils.utils import patch_torch_bmm
-from tests.models.test_model_utils import count_qmodules, delete_config, qmodule_error
+from tests.models.test_model_utils import count_qmodules, delete_file, qmodule_error
+
+
+@pytest.fixture(autouse=True)
+def delete_files():
+    """
+    Delete any known files lingering before starting test
+    """
+    delete_file("qcfg.json")
+
 
 ################
 # Qmodel tests #
@@ -49,9 +58,21 @@ if torch.cuda.is_available():
             sample_input_fp32 (torch.FloatTensor): Sample fp32 input for calibration.
             config_fp32 (dict): Config w/ fp32 settings
         """
-        delete_config()
         with pytest.raises(RuntimeError):
             qmodel_prep(model_quantized, sample_input_fp32, config_fp32)
+
+
+def test_recipe_not_present(
+    wrong_recipe_name: str,
+):
+    """
+    Test if giving a bad recipe .json file name results in a ValueError.
+
+    Args:
+        wrong_recipe_name (str): Wrong .json file name
+    """
+    with pytest.raises(ValueError):
+        qconfig_init(recipe=wrong_recipe_name)
 
 
 def test_double_qmodel_prep_assert(
@@ -68,11 +89,9 @@ def test_double_qmodel_prep_assert(
         sample_input_fp32 (torch.FloatTensor): Sample fp32 input for calibration
         config_fp32 (dict): Config w/ fp32 settings
     """
-    delete_config()
-
     # Run qmodel_prep once
     qmodel_prep(model_fp32, sample_input_fp32, config_fp32)
-    delete_config()
+    delete_file()
 
     # If model now has a quantized node, ensure it has raises a RuntimeError
     if has_quantized_module(model_fp32):
@@ -94,7 +113,6 @@ def test_config_recipes_fp32(
         sample_input_fp32 (torch.FloatTensor): Sample fp32 input for calibration
         config (dict): Recipe Config w/ int8 settings
     """
-    delete_config()
     qmodel_prep(model_fp32, sample_input_fp32, config_int8)
 
 
@@ -111,7 +129,6 @@ def test_config_recipes_fp16(
         sample_input_fp16 (torch.FloatTensor): Sample fp16 input for calibration
         config (dict): Recipe Config w/ int8 settings
     """
-    delete_config()
     qmodel_prep(model_fp16, sample_input_fp16, config_int8)
 
 
@@ -132,7 +149,6 @@ def test_config_fp32_qmodes(
         qa_mode (str): Activation quantizer
         qw_mode (str): Weight quantizer
     """
-    delete_config()
     config_int8["qa_mode"] = qa_mode
     config_int8["qw_mode"] = qw_mode
     qmodel_prep(model_config_fp32, sample_input_fp32, config_int8)
@@ -143,8 +159,12 @@ def test_config_fp32_qmodes(
 ###########################
 
 
+@pytest.mark.skipif(
+    not available_packages["torchvision"],
+    reason="Requires torchvision",
+)
 def test_resnet50_torchscript(
-    model_resnet: torchvision.models.resnet.ResNet,
+    model_resnet,
     batch_resnet: torch.FloatTensor,
     config_int8: dict,
 ):
@@ -157,13 +177,16 @@ def test_resnet50_torchscript(
         config (dict): Recipe Config w/ int8 settings
     """
     # Run qmodel_prep w/ default torchscript tracer
-    delete_config()
     qmodel_prep(model_resnet, batch_resnet, config_int8, use_dynamo=False)
     qmodule_error(model_resnet, 6, 48)
 
 
+@pytest.mark.skipif(
+    not available_packages["torchvision"],
+    reason="Requires torchvision",
+)
 def test_resnet50_dynamo(
-    model_resnet: torchvision.models.resnet.ResNet,
+    model_resnet,
     batch_resnet: torch.FloatTensor,
     config_int8: dict,
 ):
@@ -176,13 +199,16 @@ def test_resnet50_dynamo(
         config (dict): Recipe Config w/ int8 settings
     """
     # Run qmodel_prep w/ Dynamo tracer
-    delete_config()
     qmodel_prep(model_resnet, batch_resnet, config_int8, use_dynamo=True)
     qmodule_error(model_resnet, 6, 48)
 
 
+@pytest.mark.skipif(
+    not available_packages["torchvision"],
+    reason="Requires torchvision",
+)
 def test_resnet50_dynamo_layers(
-    model_resnet: torchvision.models.resnet.ResNet,
+    model_resnet,
     batch_resnet: torch.FloatTensor,
     config_int8: dict,
 ):
@@ -196,15 +222,18 @@ def test_resnet50_dynamo_layers(
         config (dict): Recipe Config w/ int8 settings
     """
     # Run qmodel_prep w/ qlayer_name_pattern + Dynamo tracer
-    delete_config()
     config_int8["qlayer_name_pattern"] = ["layer[1,2,4]"]  # allow regex
     qmodel_prep(model_resnet, batch_resnet, config_int8, use_dynamo=True)
     qmodule_error(model_resnet, 21, 33)
 
 
 # Vision Transformer tests
+@pytest.mark.skipif(
+    not available_packages["torchvision"],
+    reason="Requires torchvision",
+)
 def test_vit_torchscript(
-    model_vit: torchvision.models.vision_transformer.VisionTransformer,
+    model_vit,
     batch_vit: torch.FloatTensor,
     config_int8: dict,
 ):
@@ -217,13 +246,16 @@ def test_vit_torchscript(
         config (dict): Recipe Config w/ int8 settings
     """
     # Run qmodel_prep w/ default torchscript tracer
-    delete_config()
     qmodel_prep(model_vit, batch_vit, config_int8, use_dynamo=False)
     qmodule_error(model_vit, 2, 36)
 
 
+@pytest.mark.skipif(
+    not available_packages["torchvision"],
+    reason="Requires torchvision",
+)
 def test_vit_dynamo(
-    model_vit: torchvision.models.vision_transformer.VisionTransformer,
+    model_vit,
     batch_vit: torch.FloatTensor,
     config_int8: dict,
 ):
@@ -236,9 +268,44 @@ def test_vit_dynamo(
         config (dict): Recipe Config w/ int8 settings
     """
     # Run qmodel_prep w/ Dynamo tracer
-    delete_config()
     qmodel_prep(model_vit, batch_vit, config_int8, use_dynamo=True)
     qmodule_error(model_vit, 2, 36)
+
+
+def test_resnet18(
+    model_resnet18,
+    batch_resnet18,
+    config_int8: dict,
+):
+    """
+    Perform int8 quantization on ResNet-18 w/ Dynamo tracer
+
+    Args:
+        model_resnet18 (AutoModelForImageClassification): Resnet18 model + weights
+        batch_resnet18 (torch.FloatTensor): Batch image data for Resnet18
+        config (dict): Recipe Config w/ int8 settings
+    """
+    # Run qmodel_prep w/ Dynamo tracer
+    qmodel_prep(model_resnet18, batch_resnet18, config_int8, use_dynamo=True)
+    qmodule_error(model_resnet18, 4, 17)
+
+
+def test_vit_base(
+    model_vit_base,
+    batch_vit_base,
+    config_int8: dict,
+):
+    """
+    Perform int8 quantization on ViT-base w/ Dynamo tracer
+
+    Args:
+        model_vit_base (AutoModelForImageClassification): Resnet18 model + weights
+        batch_vit_base (torch.FloatTensor): Batch image data for Resnet18
+        config (dict): Recipe Config w/ int8 settings
+    """
+    # Run qmodel_prep w/ Dynamo tracer
+    qmodel_prep(model_vit_base, batch_vit_base, config_int8, use_dynamo=True)
+    qmodule_error(model_vit_base, 1, 73)
 
 
 def test_bert_dynamo(
@@ -255,7 +322,6 @@ def test_bert_dynamo(
         config (dict): Recipe Config w/ int8 settings
     """
     # Run qmodel_prep w/ Dynamo tracer
-    delete_config()
     qmodel_prep(model_bert, input_bert, config_int8, use_dynamo=True)
     qmodule_error(model_bert, 1, 72)
 
@@ -282,7 +348,6 @@ def test_bert_dynamo_wi_qbmm(
         input_bert (torch.FloatTensor): Tokenized input for BERT
         config (dict): Recipe Config w/ int8 settings
     """
-    delete_config()
     config_int8["nbits_bmm1"] = 8
     config_int8["nbits_bmm2"] = 8
     qmodel_prep(model_bert_eager, input_bert, config_int8, use_dynamo=True)

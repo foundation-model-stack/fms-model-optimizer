@@ -29,6 +29,7 @@ import torch.nn.functional as F
 # Local
 from fms_mo.custom_ext_kernels.utils import pack_vectorized
 from fms_mo.quant.quantizers import (
+    SAWB,
     HardPrune,
     Qbypass,
     Qdynamic,
@@ -263,7 +264,7 @@ class QLinear(nn.Linear):
             scale = torch.tensor([1.0]).to(x.dtype).to(x.device)
 
         # pylint: disable = access-member-before-definition
-        if self.calib_counter:
+        if self.calib_counter > 0:
             with torch.no_grad():
                 qinput = self.quantize_calib_feature(x / scale)
                 qweight = self.quantize_calib_weight(self.weight * scale)
@@ -271,7 +272,6 @@ class QLinear(nn.Linear):
             if self.calib_counter == 0:
                 self.quantize_calib_feature = None
                 self.quantize_calib_weight = None
-                self.calib_counter = None  # [optional] this should release the memory
 
         elif self.ptqmode == "fp32_out":
             if self.W_fp is None:
@@ -735,6 +735,8 @@ class QLinearINT8Deploy(nn.Linear):
             chunk_size: some HW may have specific chunk size (BLOCK SIZE, especially in k-dim) for
                         the reason to avoid overflow/underflow problem. This can be simulated using
                         PyTorch (break a matmul into serial smaller matmuls, slow) or Triton kernel
+            useDynMaxQfunc: [-1, -2] indicates reduce_dim, 0< val <64 indicates artificial
+                        zero-shift, False -> use normal static quantization.
 
         Returns:
             A QLinearINT8Deploy object initialized with the weights and biases from the
@@ -745,7 +747,7 @@ class QLinearINT8Deploy(nn.Linear):
             for a_or_w in ["num_bits_feature", "num_bits_weight"]
         ), "Please check nbits setting!"
 
-        target_device = kwargs.get(
+        tar_dev = kwargs.get(
             "target_device",
             kwargs.get("device", next(fms_mo_qlinear.parameters()).device),
         )
@@ -754,7 +756,7 @@ class QLinearINT8Deploy(nn.Linear):
             fms_mo_qlinear.in_features,
             fms_mo_qlinear.out_features,
             bias=fms_mo_qlinear.bias is not None,
-            device=target_device,
+            device="meta",  # init on tar_dev is unnecessary
         )
         # Make sure to register an Op for integer matmul, could be real INT matmul or emulation
         qcfg = getattr(fms_mo_qlinear, "qcfg", {})
@@ -762,6 +764,12 @@ class QLinearINT8Deploy(nn.Linear):
             "use_int_kernel", qcfg.get("use_int_kernel", "cutlass")
         )
         qlin_int.usePTnativeQfunc = kwargs.get("use_PT_native_Qfunc", False)
+        qlin_int.useDynMaxQfunc = kwargs.get("use_dynamic_max_act_Qfunc", False)
+        qlin_int.useSymAct = (
+            "sym" in fms_mo_qlinear.qa_mode
+            or fms_mo_qlinear.qa_mode in ["pertokenmax", "max"]
+            # these are the symmetric quantizers with no "sym" in their names
+        )
         qlin_int.max_acc_bits = kwargs.get("max_acc_bits", 32)
         qlin_int.accminmax = (
             -(1 << (qlin_int.max_acc_bits - 1)),
@@ -772,84 +780,147 @@ class QLinearINT8Deploy(nn.Linear):
         qlin_int.acc_dtype = torch.float16
         qlin_int.nbits_a = fms_mo_qlinear.num_bits_feature  # only support INT8 for now
         qlin_int.nbits_w = fms_mo_qlinear.num_bits_weight
+        w_levels = 2**qlin_int.nbits_w - 2
+        a_levels = 2**qlin_int.nbits_a - 1 - qlin_int.useSymAct
 
         with torch.no_grad():
             Qa = fms_mo_qlinear.quantize_feature
             Qw = fms_mo_qlinear.quantize_weight
-            a_cv, a_cvn = Qa.clip_val.item(), Qa.clip_valn.item()
-            w_cv = Qw.clip_val.item()
-            # NOTE: Keep w transposed to prevent confusion
-            Qw.dequantize = False
-            w_int8 = Qw(
-                fms_mo_qlinear.weight.float()
-            )  # Qw.clipval should have been updated after this
-            qlin_int.weight = nn.Parameter(
-                w_int8.to(torch.int8), requires_grad=False
-            )  # NOTE: may need INT W stored as FP in some cases
+            # if no calibration has been run before swapping, clipvals stored in Qw will be the
+            # ones from ckpt or default. But if want to experiment with new quantizers different
+            # from the ckpt, need to run one quantizer.fwd() to update the clipvals.
+            # NOTE currently it will recalc by default, but user can choose to turn it off
+            if kwargs.get("recalc_clipvals", True):
+                Qw(fms_mo_qlinear.weight)
+            w_cv = Qw.clip_val
+            a_cv = getattr(Qa, "clip_val", torch.tensor(8.0, device=tar_dev))
+            a_cvn = getattr(Qa, "clip_valn", torch.tensor(-8.0, device=tar_dev))
+            # Store original cv_a and cv_w in python floats (instead of tensors) will be more
+            # accurate, but not compatible for per-ch and per-token.
+            qlin_int.cvs = [a_cv, a_cvn, w_cv]  # TODO remove the need of this?
 
-            if qlin_int.usePTnativeQfunc:
-                input_scale = torch.tensor(
-                    [(a_cv - a_cvn) / (2**qlin_int.nbits_a - 1)], device=target_device
+            # prepare smoothQuant scale, = (smQ_a_scale ^ alpha)/(smQ_w_scale ^ (1-alpha) )
+            smoothq_scale = torch.tensor([1.0], device=tar_dev, dtype=fms_mo_w_dtype)
+            if getattr(fms_mo_qlinear, "smoothq", False):
+                smoothq_a_scale = fms_mo_qlinear.smoothq_act_scale
+                smoothq_w_scale = (
+                    fms_mo_qlinear.weight.abs()
+                    .max(dim=0, keepdim=True)[0]
+                    .clamp(min=1e-5)
                 )
-                input_zero_point = torch.round(-a_cvn / input_scale).to(torch.int)
-                w_scale = torch.tensor([w_cv * 2 / (2**qlin_int.nbits_w - 2)])
+                smoothq_alpha = fms_mo_qlinear.smoothq_alpha
+                if torch.all(smoothq_a_scale != 0).item():
+                    smoothq_scale = (
+                        (
+                            smoothq_a_scale**smoothq_alpha
+                            / smoothq_w_scale ** (1.0 - smoothq_alpha)
+                        )
+                        .clamp(min=1e-5)
+                        .to(smoothq_a_scale.dtype)
+                    )
+
+            # could trigger Qw.clipval re-calc for SAWB here, if needed
+            input_scale = torch.tensor(1.0, device=tar_dev)
+            w_scale = w_cv * 2 / w_levels
+            qlin_int.use_fake_zero_shift = False
+            if qlin_int.useDynMaxQfunc in [-1, -2]:
+                input_zero_point = torch.tensor(
+                    128 - qlin_int.useSymAct, device=tar_dev
+                )
+            elif 0 < qlin_int.useDynMaxQfunc < 65:
+                # introduce fake zero-shift, input_scale will be calc dynamically
+                qlin_int.use_fake_zero_shift = True
+                input_zero_point = torch.tensor(qlin_int.useDynMaxQfunc, device=tar_dev)
+            elif qlin_int.usePTnativeQfunc:
+                input_scale = torch.tensor([(a_cv - a_cvn) / a_levels], device=tar_dev)
+                input_zero_point = torch.round(-a_cvn / input_scale)
             else:
                 # fms_mo formula is a bit different from conventional PT formula
-                quant_scale = (2**qlin_int.nbits_a - 1) / torch.tensor(
-                    [a_cv - a_cvn], device=target_device
-                )
+                quant_scale = a_levels / torch.tensor([a_cv - a_cvn], device=tar_dev)
                 quant_stepsize = 1.0 / quant_scale
                 quant_zero_point = torch.round(a_cvn * quant_scale)
                 input_scale = quant_stepsize
                 input_zero_point = -quant_zero_point
-                quant_w_scale = (2**qlin_int.nbits_a - 2) / torch.tensor(
-                    [w_cv * 2], device=target_device
-                )
+                quant_w_scale = w_levels / (w_cv * 2)
                 w_scale = 1.0 / quant_w_scale
                 qlin_int.register_buffer("quant_scale", quant_scale)
                 qlin_int.register_buffer("quant_stepsize", quant_stepsize)
                 qlin_int.register_buffer("quant_zero_point", quant_zero_point)
             w_zp = torch.zeros_like(w_scale, dtype=torch.int)
 
+            input_zero_point = input_zero_point.to(torch.int)  # note 2 in pre-compute
             qlin_int.register_buffer("input_scale", input_scale)
             qlin_int.register_buffer("input_zp", input_zero_point)
             qlin_int.register_buffer("w_scale", w_scale)
             qlin_int.register_buffer("w_zp", w_zp)
-            # Store original cv_a and cv_w (in python floats, not tensors), and sq scales
-            # for later verification
-            qlin_int.cvs = [Qa.clip_val.item(), Qa.clip_valn.item(), Qw.clip_val.item()]
+            qlin_int.register_buffer("smoothq_scale", smoothq_scale)
 
-            corr_term = (
-                (input_zero_point - 128)
-                * (w_int8.sum(dim=1))
-                * w_scale.float()
-                * input_scale.float()
-            )
-            # dim=1 because w_int is in [out,in], after sum shape=[out,], same as w_scale and bias.
-            # (zp-128)*w_int8.sum(dim=1) can be >> fp16.max, use fp32 scales
-            # to make sure dtype is large enough
-            qlin_int.register_buffer("corr_term", corr_term.half())  # [DEBUG only]
-            if fms_mo_qlinear.bias is not None:
-                qlin_int.bias = nn.Parameter(
-                    (fms_mo_qlinear.bias - corr_term).to(fms_mo_w_dtype),
-                    requires_grad=False,
-                )
-                qlin_int.org_model_has_bias = True
+            # NOTE:
+            # 1. Keep W transposed to prevent confusion, hence (W.t()/scale).t()
+            # 2. only a few quantizer have .dequantize working correctly, e.g. SAWB
+            # 3. smooth_quant factor is included in the W here, will also include it in the forward
+            if isinstance(Qw, SAWB):
+                Qw.dequantize = False
+                w_int8 = Qw(fms_mo_qlinear.weight.float() * smoothq_scale)
             else:
-                qlin_int.register_buffer("bias", -corr_term.to(fms_mo_w_dtype))
-                qlin_int.org_model_has_bias = False
+                w_int8 = (
+                    torch.round((fms_mo_qlinear.weight * smoothq_scale).t() / w_scale)
+                    .clamp(-w_levels / 2, w_levels / 2)
+                    .t()
+                )
+            w_int8 = w_int8.to(
+                torch.int
+            )  # stored as int32 as correction term needs sum()
+            qlin_int.weight = nn.Parameter(w_int8.to(torch.int8), requires_grad=False)
 
-        qlin_int.register_buffer("Qa_clip_val", Qa.clip_val.detach())
-        qlin_int.register_buffer(
-            "Qa_clip_valn", Qa.clip_valn.detach()
-        )  # TODO: case for PACT?
-        qlin_int.register_buffer(
-            "Qw_clip_val", Qw.clip_val.detach()
-        )  # asym W quantizer may have clipvaln
+            # Pre-compute the "correction term" for zero-shift for asym activation quantizers
+            # NOTE:
+            # 1. sym act should have corr_term=0, unless we want to introduce fake zero-shift
+            # 2. sum to reduce dim=1 because w_int is in [out,in], after sum shape=[out,], same as
+            #    w_scale (per-Ch) and bias.
+            # 3. calc INT part, i.e. (zp-128)*w_int8.sum(dim=1), first in INT32. because it can be
+            #    >> fp16.max (~65535 only) easily, make sure not to cast INT32 to FP16 during calc,
+            #    simply cast scales to FP32
+            # 4. for the "fake zero-shift case", input_scale will be max/(127-fake_zero_shift)
+            #    instead of max/127, see qa_dyn_max_fake_zero_shift()
+            # 5. Combine correction term into linear.bias for non-dynamic cases. For dyn quant,
+            #    input_scale is a placehold for now and will be calc'ed on the fly later.
+            if qlin_int.useSymAct:
+                corr_term_int = 0
+                if qlin_int.use_fake_zero_shift:
+                    # one exception, fake zero-shift
+                    corr_term_int = input_zero_point * (w_int8.sum(dim=1))
+            else:
+                corr_term_int = (input_zero_point - 128) * (w_int8.sum(dim=1))
+
+            qlin_int.register_buffer(
+                "corr_term", corr_term_int * w_scale.float() * input_scale.float()
+            )  # keep in FP32, cast at the end
+
+            qlin_int.org_model_has_bias = fms_mo_qlinear.bias is not None
+            # Combine correction term into linear.bias when possible. NOTE the magnitude of these 2
+            # terms could vary a lot. use fp32 in case of underflow and lose accuracy.
+            if qlin_int.org_model_has_bias:
+                new_bias = fms_mo_qlinear.bias.float() - qlin_int.corr_term
+            else:
+                new_bias = -qlin_int.corr_term
+
+            if qlin_int.use_fake_zero_shift:
+                # dyn sym act but with fake zp, remove corr_term from bias
+                new_bias += qlin_int.corr_term
+
+            delattr(qlin_int, "bias")
+            # sometimes reg_buffer() is unhappy about existing bias
+            qlin_int.register_buffer("bias", new_bias.to(fms_mo_w_dtype))
+
+        # redundant variables to be cleaned up
+        # qlin_int.register_buffer("Qa_clip_val", Qa.clip_val.detach())
+        # qlin_int.register_buffer("Qa_clip_valn", Qa.clip_valn.detach())
+        # qlin_int.register_buffer("Qw_clip_val", Qw.clip_val.detach())
 
         qlin_int.set_matmul_op()
 
-        return qlin_int.to(target_device)
+        return qlin_int.to(tar_dev)
 
     @classmethod
     def from_torch_iW(cls, nnlin_iW, prec, a_cv, a_cvn, w_cv, zero_shift, **kwargs):
@@ -969,7 +1040,7 @@ class QLinearINT8Deploy(nn.Linear):
             Tensor: Quantized tensor with values in the range [-128, 127].
         """
         return torch.ops.fms_mo.q_per_t_sym(
-            x.float(), self.input_scale, self.input_zp - 128
+            x.float(), self.input_scale, self.input_zp - 128 + self.useSymAct
         )
 
     def qa_pt_quant_func(self, x):
@@ -984,41 +1055,65 @@ class QLinearINT8Deploy(nn.Linear):
             Tensor: Quantized tensor with values in the range [-128, 127].
         """
         return torch.quantize_per_tensor(
-            x.float(), self.input_scale, self.input_zp - 128, torch.qint8
+            x.float(),
+            self.input_scale,
+            self.input_zp - 128 + self.useSymAct,
+            torch.qint8,
         ).int_repr()
 
     def qa_raw_qfunc(self, x):
         """
         Quantizes the input tensor x to 8-bit integer values using raw formula, slower if not
         torch.compiled
-
-        Args:
-            x (Tensor): Input tensor to be quantized.
-
-        Returns:
-            Tensor: Quantized tensor with values in the range [-128, 127].
         """
-        x = torch.clamp((x / self.input_scale + self.input_zp - 128).round(), -128, 127)
+        x = torch.clamp(
+            (x / self.input_scale + self.input_zp - 128 + self.useSymAct).round(),
+            -128,
+            127,
+        )
         return x.to(torch.int8)
 
     def qa_fmo_mo_qfunc(self, x):
         """
-        Quantizes the input tensor x to 8-bit integer values.
-
-        Args:
-            x (Tensor): Input tensor to be quantized.
-
-        Returns:
-            Tensor: Quantized tensor with values in the range [-128, 127].
+        Quantizes the input tensor x to 8-bit integer values. Note that old fms-mo formula clamps
+        before rounds, as opposed to typical torch formula that rounds before clamps.
+        (See qa_raw_qfunc() above.)
         """
-        x = (
-            torch.round(
-                x.clamp(self.cvs[1], self.cvs[0]) / self.quant_stepsize
-                - self.quant_zero_point
-            )
-            - 128
-        )
+        x = torch.round(
+            x.clamp(self.cvs[1], self.cvs[0]) / self.quant_stepsize
+            - self.quant_zero_point
+        ) - (128 - self.useSymAct)
         return x.to(torch.int8)
+
+    def qa_dynamic_max_qfunc(self, x):
+        """
+        Symmetric dynamic quantizer, same as QDynMax, which allows per-token or per-channel.
+        This quantizer will not use self.input_scale but instead will update it every time.
+        NOTE
+        1. self.input_scale.shape should be (x.shape[-2], ) if reduce_dim == -1 and (, x.shape[-1])
+            for reduce_dim == -2.
+        2. input_scale should be be broadcasted correctly together with W_scale (e.g. if per-Ch) at
+            final output step, i.e. imm_out*(a_scale*w_scale)*...
+        """
+        amax = x.abs().max(dim=self.useDynMaxQfunc, keepdim=True)[0]
+        levels = 2 ** (self.nbits_a - 1) - 1
+        self.cvs[0] = amax
+        self.cvs[1] = -amax
+        self.input_scale = amax.clamp(min=1e-5).div(levels)
+        return torch.round(x / self.input_scale).to(torch.int8)
+
+    def qa_dyn_max_fake_zero_shift(self, x):
+        """Dynamic max quantizer with fake zero-shift in order to accommodate "zero-centered"
+        activations. "partial" correction term has been pre-computed in from_fms_mo() but still need
+        to multiply input_scale. (Assuming per-tensor, can shift left or right)
+        """
+        amax = x.abs().max()
+        levels = 2 ** (self.nbits_a - 1) - 1 - self.input_zp
+        self.cvs[0] = amax
+        self.cvs[1] = -amax
+        self.input_scale = amax.clamp(min=1e-5) / levels
+        xq = torch.round(x / self.input_scale) + self.input_zp
+        return xq.to(torch.int8)
 
     def iaddmm_int(self, bias, m1, m2):
         """
@@ -1037,17 +1132,24 @@ class QLinearINT8Deploy(nn.Linear):
             The result of the integer matrix multiplication with the bias added.
         """
 
-        if self.usePTnativeQfunc:
+        if self.useDynMaxQfunc in [-1, -2]:
+            m1 = self.qa_dynamic_max_qfunc(m1)
+        elif self.use_fake_zero_shift:
+            m1 = self.qa_dyn_max_fake_zero_shift(m1)
+        elif self.usePTnativeQfunc:
             m1 = self.qa_raw_qfunc(m1)
         else:
             m1 = self.qa_fmo_mo_qfunc(m1)
 
+        # NOTE simulate chunk behavior in pytorch is serial and slow, use triton when possible
         if m1.shape[1] > self.chunk_size and self.use_int_kernel != "triton":
             idx = list(range(0, m1.shape[1], self.chunk_size))
             Nchunk = len(idx)
             idx.append(m1.shape[1])
             accumulator = torch.zeros(
-                (m1.shape[0], m2.shape[1]), dtype=torch.float16, device=m1.device
+                (m1.shape[0], m2.shape[1]),
+                dtype=torch.int,
+                device=m1.device,  # cast float16 if needed
             )
             trun_scale = 1
             if self.truncate_lsb > 0:
@@ -1067,17 +1169,25 @@ class QLinearINT8Deploy(nn.Linear):
                     # could cast to smaller data type to further simulate HW behavior, for example,
                     # if HW truncates 8b from both sides of i32 accumulator, the remaining data can
                     # be cast to i16 to be more realistic. pay attention to overflow handling
-                accumulator += imm_out.to(torch.float16)
+                accumulator += imm_out  # .to(torch.float16) if needed
 
             return (
                 accumulator
                 * (trun_scale * self.input_scale * self.w_scale)  # .to(torch.float16)
                 + bias
-            ).to(self.acc_dtype)
-        # The safest casting, i32 -> f32
+            ).to(self.acc_dtype)  # safest casting would be i32 -> f32
+
         imm_out = torch.ops.fms_mo.imatmul(m1, m2)
+
+        updated_bias = bias
+        if self.use_fake_zero_shift:
+            # Do NOT change the stored self.corr_term and self.bias
+            updated_bias = bias - self.input_scale * self.corr_term
+
+        # cast to fp16 could be modified based on real HW behavior/design
         return (
-            imm_out.float() * (self.input_scale * self.w_scale).to(torch.float16) + bias
+            imm_out.float() * (self.input_scale * self.w_scale).to(torch.float16)
+            + updated_bias
         ).to(self.acc_dtype)
 
     def iaddmm_FP(self, bias, m1, m2):
@@ -1094,8 +1204,14 @@ class QLinearINT8Deploy(nn.Linear):
         Returns:
             Tensor: the result of the matrix multiplication with addition of bias
         """
-        m2 = m2.to(m1.dtype)
-        return torch.addmm(bias, m1, m2)
+        if self.useDynMaxQfunc in [-1, -2]:
+            m1 = self.qa_dynamic_max_qfunc(m1)
+        elif self.usePTnativeQfunc:
+            m1 = self.qa_raw_qfunc(m1)
+        else:
+            m1 = self.qa_fmo_mo_qfunc(m1)
+
+        return torch.matmul(m1 * self.input_scale, m2 * self.w_scale) + bias
 
     def set_matmul_op(self):
         """
@@ -1215,9 +1331,12 @@ class QLinearINT8Deploy(nn.Linear):
                 self.weight.shape[0],
             )  # W.shape=[out,in]
 
-            x = self.iaddmm(self.bias, x.view(re_shape), self.weight.t()).reshape(
-                tar_shape
-            )
+            if torch.all(self.smoothq_scale != 1).item():
+                x = x.view(re_shape) / self.smoothq_scale
+            else:
+                x = x.view(re_shape)
+
+            x = self.iaddmm(self.bias, x, self.weight.t()).reshape(tar_shape)
 
         return x.to(org_dtype)
 
@@ -1467,16 +1586,22 @@ class QLinearCutlassI8I32NT(QLinearCublasI8I32NT):
         return x.to(in_dtype)
 
 
-try:
+gptq_available = (
+    available_packages["gptqmodel"]
+    and available_packages["gptqmodel_exllama_kernels"]
+    and available_packages["gptqmodel_exllamav2_kernels"]
+)
+
+if gptq_available:
     # Third Party
-    from auto_gptq.nn_modules.qlinear.qlinear_exllama import (
-        QuantLinear as QLinearExllamaV1,
+    from gptqmodel.nn_modules.qlinear.exllama import (
+        ExllamaQuantLinear as QLinearExllamaV1,
     )
-    from auto_gptq.nn_modules.qlinear.qlinear_exllamav2 import (
-        QuantLinear as QLinearExllamaV2,
+    from gptqmodel.nn_modules.qlinear.exllamav2 import (
+        ExllamaV2QuantLinear as QLinearExllamaV2,
     )
-    from auto_gptq.nn_modules.qlinear.qlinear_exllamav2 import ext_gemm_half_q_half
-    from exllama_kernels import prepare_buffers, set_tuning_params
+    from gptqmodel.nn_modules.qlinear.exllamav2 import ext_gemm_half_q_half
+    from gptqmodel_exllama_kernels import prepare_buffers, set_tuning_params
     from transformers.pytorch_utils import Conv1D
 
     class QLinearExv1WI4AF16(QLinearExllamaV1):
@@ -1582,7 +1707,7 @@ try:
                 Tensor: Output tensor of shape (batch_size, out_features).
             """
             with torch.no_grad():
-                x = torch.ops.autogptq_gemm.exv1_i4f16(x.half(), self.q4, self.width)
+                x = torch.ops.gptqmodel_gemm.exv1_i4f16(x.half(), self.q4, self.width)
 
             if self.bias is not None:
                 x.add_(self.bias)
@@ -1732,7 +1857,7 @@ try:
             if kwargs.get(
                 "useInductor", False
             ):  # anything other than False or None will use torch wrapped version
-                qlinear_ex.extOp = torch.ops.autogptq_gemm.exv2_i4f16
+                qlinear_ex.extOp = torch.ops.gptqmodel_gemm.exv2_i4f16
             else:
                 qlinear_ex.extOp = ext_gemm_half_q_half
 
@@ -1766,35 +1891,6 @@ try:
                     x.add_(self.bias)
                 return x
 
-except ModuleNotFoundError:
-    logger.warning(
-        "AutoGPTQ is not properly installed. "
-        "QLinearExv1WI4AF16 and QLinearExv2WI4AF16 wrappers will not be available."
-    )
-
-QLinear_modules = (
-    QLinear,
-    QLinearFPout,
-    QLinearDebug,
-    QLinearW4A32Debug,
-    QLinearINT8Deploy,
-    QLinearCublasI8I32NT,
-    QLinearCutlassI8I32NT,
-)
-
-
-def isinstance_qlinear(module):
-    """
-    Checks if the given module is one of the available quantized linear classes.
-
-    Args:
-        module (nn.Module): The module to check.
-
-    Returns:
-        bool: True if the module is a quantized linear class, False otherwise.
-    """
-    return isinstance(module, QLinear_modules)
-
 
 class LinearFuncFPxFwdBwd(torch.autograd.Function):
     """Linear function using FP24 accumulation, experimental only.
@@ -1806,7 +1902,16 @@ class LinearFuncFPxFwdBwd(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, x, weight, bias=None, trun_bits=0, chunk_size=16, fp8_dyn=False):
+    def forward(
+        ctx,
+        x,
+        weight,
+        bias=None,
+        trun_bits=0,
+        chunk_size=16,
+        fp8_dyn=False,
+        clamp_acc_to_dl16=False,
+    ):
         assert x.dtype in [torch.float, torch.bfloat16, torch.float16]
         # input can be 2D or 3D, need to reshape before tl_matmul
         org_dtype = x.dtype
@@ -1823,27 +1928,49 @@ class LinearFuncFPxFwdBwd(torch.autograd.Function):
         ctx.trun_bits = trun_bits
         ctx.chunk_size = chunk_size
         ctx.fp8_dyn = fp8_dyn
+        ctx.clamp_acc_to_dl16 = clamp_acc_to_dl16
+        ctx.fp8_e4m3_max = torch.finfo(torch.float8_e4m3fn).max
+        ctx.fp8_e5m2_max = torch.finfo(torch.float8_e5m2).max
+        ctx.dl8_min = 0.0087890625
 
+        x_scale = torch.tensor(1.0, device=x.device, dtype=org_dtype)
+        w_scale = x_scale.clone()
         if fp8_dyn:
             # use Q/dQ simulation for now, meaning still compute in fp16/bf16
             # if choose per_token for input, use per_channel for W
             # (W saved as [out, in], reduce inCh-dim, => reduce_dim=1)
-            ctx.fp8_e4m3_max = torch.finfo(torch.float8_e4m3fn).max
-            ctx.fp8_e5m2_max = torch.finfo(torch.float8_e5m2).max
             reduce_dim = None if fp8_dyn == "per_tensor" else 1
-            x_scale = x.abs().amax(dim=reduce_dim) / ctx.fp8_e4m3_max
-            w_scale = weight.abs().amax(dim=reduce_dim) / ctx.fp8_e4m3_max
+            x_scale = (
+                x.abs().amax(dim=reduce_dim, keepdim=True) / ctx.fp8_e4m3_max
+            ).clamp(min=1e-5)
+            w_scale = (
+                weight.abs().amax(dim=reduce_dim, keepdim=True) / ctx.fp8_e4m3_max
+            ).clamp(min=1e-5)
 
-            x = (x / x_scale).to(torch.float8_e4m3fn).to(org_dtype) * x_scale
-            weight = (weight / w_scale).to(torch.float8_e4m3fn).to(org_dtype) * w_scale
+            x = (x / x_scale).to(torch.float8_e4m3fn).to(torch.float32)
+            weight = (weight / w_scale).to(torch.float8_e4m3fn).to(torch.float32)
+            if clamp_acc_to_dl16:
+                # at this point, x and W are clamped to PT's FP8 range (2^-9 to 448). But since DL8
+                # doesn't support subnorm like PyTorch, need to flush subnorms to 0 BEFORE descaling
+                x.masked_fill_(x.abs() < ctx.dl8_min, 0)
+                weight.masked_fill_(weight.abs() < ctx.dl8_min, 0)
 
         # triton kernel assumes 2D inputs and cast the return to input.dtype
-        output = tl_matmul(
-            x,
-            weight.t().to(org_dtype),
-            chunk_trun_bits=trun_bits,
-            chunk_size=chunk_size,
-        ).reshape(target_shape_output)
+        output = (
+            (
+                tl_matmul(
+                    x,
+                    weight.t(),
+                    chunk_trun_bits=trun_bits,
+                    chunk_size=chunk_size,
+                    clamp_acc_to_dl16=clamp_acc_to_dl16,
+                )
+                * x_scale
+                * w_scale.t()
+            )
+            .to(org_dtype)
+            .reshape(target_shape_output)
+        )
 
         if bias is not None:
             output = output + bias.to(org_dtype)
@@ -1863,6 +1990,8 @@ class LinearFuncFPxFwdBwd(torch.autograd.Function):
         target_shape_grad_input = grad_output.shape[:-1] + (in_dim,)
         grad_output_2D = grad_output.reshape(-1, out_dim).to(dtype_input)
 
+        x_scale = torch.tensor(1.0, device=x.device, dtype=dtype_input)
+        w_scale = x_scale.clone()
         if ctx.fp8_dyn:
             reduce_dim = None if ctx.fp8_dyn == "per_tensor" else 1
             x_scale = x.abs().amax(dim=reduce_dim) / ctx.fp8_e5m2_max
@@ -1870,30 +1999,45 @@ class LinearFuncFPxFwdBwd(torch.autograd.Function):
             # always assume perT in this case
             grad_out_scale = grad_output_2D.abs().amax(dim=None) / ctx.fp8_e5m2_max
 
-            x = (x / x_scale).to(torch.float8_e5m2).to(dtype_input) * x_scale
-            weight = (weight / w_scale).to(torch.float8_e5m2).to(weight.dtype) * w_scale
-            grad_output_2D = (grad_output_2D / grad_out_scale).to(torch.float8_e5m2).to(
-                grad_output.dtype
-            ) * grad_out_scale
+            x = (x / x_scale).to(torch.float8_e5m2).to(torch.float)
+            weight = (weight / w_scale).to(torch.float8_e5m2).to(torch.float)
+            grad_output_2D = (
+                (grad_output_2D / grad_out_scale).to(torch.float8_e5m2).to(torch.float)
+            )
+            if ctx.clamp_acc_to_dl16:
+                # flush subnorm numbers to 0 as DL8 doesn't support it
+                x.masked_fill_(x.abs() < ctx.dl8_min, 0)
+                weight.masked_fill_(weight.abs() < ctx.dl8_min, 0)
+                grad_output_2D.masked_fill_(grad_output_2D.abs() < ctx.dl8_min, 0)
 
         # Compute grad_weight, shape = [out, in]
         # NOTE: this triton kernel requires A matrix to be contiguous
-        grad_weight = tl_matmul(
-            grad_output_2D.transpose(0, 1).contiguous(),
-            x,
-            chunk_trun_bits=trun_bits,
-            chunk_size=chunk_size,
+        grad_weight = (
+            tl_matmul(
+                grad_output_2D.transpose(0, 1).contiguous(),
+                x,
+                chunk_trun_bits=trun_bits,
+                chunk_size=chunk_size,
+                clamp_acc_to_dl16=ctx.clamp_acc_to_dl16,
+            )
+            * grad_out_scale.t()
+            * x_scale
         ).to(weight.dtype)
         # Compute grad_input in 2D then reshape to target shape, could be 3D or 2D
         grad_input = (
-            tl_matmul(
-                grad_output_2D,
-                weight.to(dtype_input),
-                chunk_trun_bits=trun_bits,
-                chunk_size=chunk_size,
+            (
+                tl_matmul(
+                    grad_output_2D,
+                    weight,
+                    chunk_trun_bits=trun_bits,
+                    chunk_size=chunk_size,
+                    clamp_acc_to_dl16=ctx.clamp_acc_to_dl16,
+                )
+                * grad_out_scale
+                * w_scale
             )
-            .reshape(target_shape_grad_input)
             .to(dtype_input)
+            .reshape(target_shape_grad_input)
         )
 
         if not ctx.has_bias:
@@ -1901,7 +2045,7 @@ class LinearFuncFPxFwdBwd(torch.autograd.Function):
         else:
             grad_bias = grad_output_2D.sum(0).to(ctx.bias_dtype)
 
-        return grad_input, grad_weight, grad_bias, None, None, None
+        return grad_input, grad_weight, grad_bias, None, None, None, None
 
 
 class LinearFPxAcc(torch.nn.Linear):
@@ -1923,6 +2067,10 @@ class LinearFPxAcc(torch.nn.Linear):
             cls (class): The class to be created.
             nnlin (torch.nn.Linear): The original torch.nn.Linear module.
             trun_bits (int): truncate [0 to 22] LSBs from FP32 accumulation.
+            dynamic_fp8: whether to use dynamic quantization for fp8 activations, available options
+                        are ["per_tensor", "per_token", False]
+            clamp_acc_to_dl16: clamp local accumulator into DL16 range, to simulate the effect of
+                                this special dtype
             **kwargs: Additional keyword arguments.
 
         Returns:
@@ -1937,14 +2085,14 @@ class LinearFPxAcc(torch.nn.Linear):
             nnlin.in_features,
             nnlin.out_features,
             bias=nnlin.bias is not None,
-            device=target_device,
+            device="meta",
         )
 
         lin24acc.weight = nnlin.weight
         lin24acc.trun_bits = trun_bits
         lin24acc.chunk_size = kwargs.get("chunk_size", False)
         lin24acc.fp8_dyn = kwargs.get("dynamic_fp8", False)
-        # available options are ["per_tensor", "per_token"]
+        lin24acc.clamp_acc_to_dl16 = kwargs.get("clamp_acc_to_dl16", False)
 
         if nnlin.bias is not None:
             lin24acc.bias = nnlin.bias
@@ -1959,13 +2107,334 @@ class LinearFPxAcc(torch.nn.Linear):
             self.trun_bits,
             self.chunk_size,
             self.fp8_dyn,
+            self.clamp_acc_to_dl16,
         )
 
     def extra_repr(self) -> str:
         """
         Returns an alternative string representation of the object.
         """
-        return (
-            f"in={self.in_features}, out={self.out_features}, bias={self.bias is not None}, "
-            f"trun_bits={self.trun_bits},fp8_dyn={self.fp8_dyn},chunk_size={self.chunk_size}"
+        repr_str = f"{self.in_features},{self.out_features}"
+        if self.bias is not None:
+            repr_str += f",bias={self.bias is not None}"
+        if self.trun_bits > 0:
+            repr_str += f",trun_bits={self.trun_bits}"
+        if self.fp8_dyn:
+            repr_str += f",fp8_dyn={self.fp8_dyn}"
+        if self.clamp_acc_to_dl16:
+            repr_str += ",use_DL16_acc"
+        repr_str += f",chunk_size={self.chunk_size}"
+        return repr_str
+
+
+class LinearFuncINT8FwdFP32Bwd(torch.autograd.Function):
+    """[Experimental] Linear autograd function using INT matmul/accumulation to simulate HW behavior
+    during QAT, in order to adjust weights for specific HW design.
+    Args:
+        activation x: FP tensor, need to be reshaped to 2D and quantized to INT8.
+        weight: FP 2D tensor, W.shape = [out, in].
+        bias: bias from original Linear, does not include INT ZP correction term yet.
+    NOTE:
+    1. main purpose is to utilize triton INT kernel to simulate MSB/LSB truncation in FWD.
+    2. BWD simply uses torch.matmul.
+    3. *Max per-Ch* for weights and *dynamic max per-Token* for activations.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        x,
+        weight,
+        bias=None,
+        lsb_trun_bits=0,
+        chunk_size=64,
+        max_acc_bits=32,
+    ):
+        assert x.dtype in [torch.float, torch.bfloat16, torch.float16]
+        # input can be 2D or 3D, need to reshape before tl_matmul
+        org_dtype = x.dtype
+        target_shape_output = x.shape[:-1] + (weight.shape[0],)
+        x = x.reshape(-1, x.shape[-1])
+
+        if bias is not None:
+            ctx.has_bias = True
+            ctx.bias_dtype = bias.dtype
+        else:
+            ctx.has_bias = False
+
+        ctx.save_for_backward(x, weight)  # x, W are saved in their original dtype
+
+        # max per_token for input -> reduce_dim = -1
+        # per_channel for W but W.shape = [out, in] -> reduce_dim = -1
+        # sym activation -> correction term = 0
+        x_scale = x.abs().amax(dim=-1, keepdim=True) / 127
+        w_scale = weight.abs().amax(dim=-1, keepdim=True) / 127
+
+        x_i8 = torch.round(x / x_scale).to(torch.int8)
+        w_i8 = torch.round(weight / w_scale).to(torch.int8)
+
+        # triton kernel accepts 2d int8 then return int32
+        output = tl_matmul(
+            x_i8,
+            w_i8.t(),
+            chunk_trun_bits=lsb_trun_bits,
+            chunk_size=chunk_size,
+            max_acc_bits=max_acc_bits,
         )
+        output = (
+            (output.to(torch.float) * x_scale * w_scale.t())
+            .reshape(target_shape_output)
+            .to(org_dtype)
+        )
+        if bias is not None:
+            output = output + bias.to(org_dtype)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        # load x and W from context, x is 2D already. no quant.
+        # option 1: use compute dtype = x.dtype
+        # option 2: compute in fp32 for best results.
+        x, weight = ctx.saved_tensors  # x, W are saved in original dtype
+        out_dim = weight.shape[0]
+        in_dim = weight.shape[1]
+        dtype_grad = x.dtype  # torch.float
+        # grad_input and grad_output could be 3D as x
+        target_shape_grad_input = grad_output.shape[:-1] + (in_dim,)
+        grad_output_2D = grad_output.reshape(-1, out_dim).to(dtype_grad)
+
+        # Compute grad_weight, shape = [out, in]
+        grad_weight = torch.matmul(
+            grad_output_2D.transpose(0, 1).contiguous(),
+            x.to(dtype_grad),
+        ).to(weight.dtype)
+        # Compute grad_input in 2D then reshape to target shape, could be 3D or 2D
+        grad_input = (
+            torch.matmul(
+                grad_output_2D,
+                weight.to(dtype_grad),
+            )
+            .reshape(target_shape_grad_input)
+            .to(x.dtype)
+        )
+
+        if not ctx.has_bias:
+            grad_bias = None
+        else:
+            grad_bias = grad_output_2D.sum(0).to(ctx.bias_dtype)
+
+        return grad_input, grad_weight, grad_bias, None, None, None
+
+
+class QLinearINT8Train(torch.nn.Linear):
+    """QLinear layer wrapper that simulates INT8 HW behavior, e.g. MSB/LSB truncation, in forward
+    and FP32 in backward.
+    """
+
+    @classmethod
+    def from_fms_mo(cls, nnlin, lsb_trun_bits=0, **kwargs):
+        """Converts a torch.nn.Linear or QLinear module to QLinearINT8Train
+
+        Args:
+            cls (class): The class to be created.
+            nnlin (torch.nn.Linear or QLinear): The Linear module to be converted.
+            lsb_trun_bits (int): INT8 LSB truncation, [0 to 16].
+            chunk_size (int): usually >= 64 for INT8, based on HW design.
+            max_acc_bits: accumulator max bits, <=32, based on HW design.
+
+        Returns:
+            LinearFPxAcc: The converted linear layer.
+        """
+
+        target_device = kwargs.get(
+            "target_device", kwargs.get("device", next(nnlin.parameters()).device)
+        )
+
+        lin_int8fwd = cls(
+            nnlin.in_features,
+            nnlin.out_features,
+            bias=nnlin.bias is not None,
+            device="meta",  # target_device,
+        )
+
+        lin_int8fwd.weight = nnlin.weight
+        lin_int8fwd.lsb_trun_bits = lsb_trun_bits
+        lin_int8fwd.chunk_size = kwargs.get("chunk_size", 64)
+        lin_int8fwd.max_acc_bits = kwargs.get("max_acc_bits", 32)
+
+        if nnlin.bias is not None:
+            lin_int8fwd.bias = nnlin.bias
+        return lin_int8fwd.to(target_device)
+
+    def forward(self, inputs):
+        return LinearFuncINT8FwdFP32Bwd.apply(
+            inputs,
+            self.weight,
+            self.bias,
+            self.lsb_trun_bits,
+            self.chunk_size,
+            self.max_acc_bits,
+        )
+
+    def extra_repr(self) -> str:
+        """Returns an alternative string representation of the object."""
+        repr_str = f"{self.in_features},{self.out_features}"
+        repr_str += f",bias={self.bias is not None},chunk_size={self.chunk_size}"
+        if self.lsb_trun_bits > 0:
+            repr_str += f",lsb_trun={self.lsb_trun_bits}"
+        if self.max_acc_bits < 32:
+            repr_str += f",max_acc_bits={self.max_acc_bits}"
+        return repr_str
+
+
+if available_packages["mx"]:
+    # Third Party
+    # pylint: disable = import-error
+    from mx.elemwise_ops import quantize_elemwise_op
+    from mx.linear import linear as mx_linear
+    from mx.specs import apply_mx_specs, mx_assert_test
+
+    # import mx  # defaults to import all classes
+
+    mx_specs_default = {
+        "w_elem_format": "fp8_e4m3",
+        "a_elem_format": "fp8_e4m3",
+        "block_size": 32,
+        "bfloat": 16,
+        "custom_cuda": True,
+        # For quantization-aware finetuning, do backward pass in FP32
+        "quantize_backprop": False,
+    }
+
+    class QLinearMX(torch.nn.Linear):
+        """Modified from mx.linear class. Only mildly changed init() and add extra_repr.
+        1. Add **kwargs to receive extra (unused) params passed from qmodel_prep
+        2. pass device to super.init, i.e. nn.Linear's
+        """
+
+        def __init__(
+            self,
+            in_features,
+            out_features,
+            bias=True,
+            mx_specs=None,
+            name=None,
+            **kwargs,
+        ):
+            mx_assert_test(mx_specs)
+            self.mx_none = mx_specs is None
+
+            self.name = name
+            self.prequantized_weights = False
+            self.mx_specs = apply_mx_specs(mx_specs)
+            super().__init__(
+                in_features, out_features, bias, device=kwargs.get("device", "cuda")
+            )
+
+        def apply_mx_specs(self, mx_specs):
+            """Unchanged."""
+            mx_assert_test(mx_specs)
+            self.mx_none = mx_specs is None
+            self.mx_specs = apply_mx_specs(mx_specs)
+
+        def append_name(self, postfix):
+            """Unchanged."""
+            self.name += postfix
+
+        def prequantize_weights(self):
+            """Unchanged."""
+            # Can't prequantize if not using bfloat weights
+            if self.mx_none:
+                return
+
+            assert (
+                self.mx_specs["round"] == "even"
+            ), "Bfloat round should be 'even' for prequantizing weights."
+            assert (
+                torch.cuda.is_bf16_supported()
+            ), "Current device does not support bfloat16"
+            assert self.mx_specs[
+                "bfloat_subnorms"
+            ], "Bfloat_subnorms should be set to True for prequantizing weights."
+            assert (
+                self.mx_specs["bfloat"] == 16
+            ), "Only Bfloat16 is supported for prequantizing weights."
+
+            with torch.no_grad():
+                self.weight.data = quantize_elemwise_op(
+                    self.weight.data,
+                    mx_specs=self.mx_specs,
+                    round=self.mx_specs["round_weight"],
+                ).to(torch.bfloat16)
+
+                if self.bias is not None:
+                    self.bias.data = quantize_elemwise_op(
+                        self.bias.data,
+                        mx_specs=self.mx_specs,
+                        round=self.mx_specs["round_weight"],
+                    ).to(torch.bfloat16)
+
+            self.prequantized_weights = True
+
+        def forward(self, inputs):
+            """Unchanged."""
+            if self.mx_none:
+                return super().forward(inputs)
+
+            if self.prequantized_weights:
+                assert (
+                    not self.training
+                ), "Cannot use prequantized weights when training!"
+
+            return mx_linear(
+                input=inputs,
+                weight=self.weight,
+                bias=self.bias,
+                mx_specs=self.mx_specs,
+                prequantized_weights=self.prequantized_weights,
+                name=self.name,
+            )
+
+        def extra_repr(self) -> str:
+            repr_str = (
+                f"in={self.in_features},out={self.out_features},"
+                f"w_fmt={self.mx_specs['w_elem_format']},a_fmt={self.mx_specs['a_elem_format']},"
+                f"blk_size={self.mx_specs['block_size']}"
+            )
+            return repr_str
+
+
+# KEEP THIS AT END OF FILE - classes must be declared
+QLinear_modules = (
+    QLinear,
+    QLinearFPout,
+    QLinearDebug,
+    QLinearW4A32Debug,
+    QLinearINT8Deploy,
+    QLinearCublasI8I32NT,
+    QLinearCutlassI8I32NT,
+)
+if available_packages["mx"]:
+    QLinear_modules += (QLinearMX,)
+
+if gptq_available:
+    QLinear_modules += (
+        QLinearExllamaV1,
+        QLinearExllamaV2,
+        QLinearExv1WI4AF16,
+        QLinearExv2WI4AF16,
+    )
+
+
+def isinstance_qlinear(module):
+    """
+    Checks if the given module is one of the available quantized linear classes.
+
+    Args:
+        module (nn.Module): The module to check.
+
+    Returns:
+        bool: True if the module is a quantized linear class, False otherwise.
+    """
+    return isinstance(module, QLinear_modules)

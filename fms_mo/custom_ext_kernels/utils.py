@@ -14,7 +14,7 @@
 
 
 """This file contains external kernel registrations, compilation, and packing functions.
-Some functions may require additional packages, e.g. auto_gptq, cutlass (source clone)
+Some functions may require additional packages, e.g. gptqmodel, cutlass (source clone)
 """
 
 # pylint: disable=ungrouped-imports,unused-argument,c-extension-no-member
@@ -491,44 +491,46 @@ def cutlass_ops_load_and_reg(qcfg=None, run_unit_test=False):
 
 
 def exllama_ops_load_and_reg(qcfg=None, run_unit_test=False):
-    """Register Exllama kernels borrowed from auto-gptq
+    """Register Exllama kernels borrowed from gptqmodel
     Args:
         qcfg: dict. quant config
         run_unit_test: bool. Run unit tests after Op registration. (if unit tests defined.)
 
     NOTE:
-        1. need to install auto-gptq python package
+        1. need to install gptqmodel python package
         2. Op registration signature changed drastically from torch 2.1 - 2.4. TODO: add 2.4 support
 
-    see https://github.com/AutoGPTQ/AutoGPTQ for installation instruction
+    see https://github.com/ModelCloud/GPTQModel for installation instructions
     """
     if qcfg is None:
         qcfg = {}
     elif qcfg:
-        qcfg["AUTOGPTQ_AVAILABLE"] = False
+        qcfg["GPTQMODEL_AVAILABLE"] = False
 
-    namespace = "autogptq_gemm"
+    namespace = "gptqmodel_gemm"
     # check before compile
-    if hasattr(torch.ops, namespace) and hasattr(torch.ops.autogptq_gemm, "exv1_i4f16"):
-        logger.info("Custom AutoGPTQ functions have been loaded already!")
-        qcfg["AUTOGPTQ_AVAILABLE"] = True
+    if hasattr(torch.ops, namespace) and hasattr(
+        torch.ops.gptqmodel_gemm, "exv1_i4f16"
+    ):
+        logger.info("Custom GPTQModel functions have been loaded already!")
+        qcfg["GPTQMODEL_AVAILABLE"] = True
         need_registration = False
     else:
         need_registration = (
-            available_packages["exllama_kernels"]
-            and available_packages["exllamav2_kernels"]
+            available_packages["gptqmodel_exllama_kernels"]
+            and available_packages["gptqmodel_exllamav2_kernels"]
         )
 
         if not need_registration:
             logger.warning(
-                "Please check the installation of AutoGPTQ package."
+                "Please check the installation of GPTQModel package."
                 "External kernels cannot be used this time."
             )
             return
 
         # Third Party
-        import exllama_kernels
-        import exllamav2_kernels
+        import gptqmodel_exllama_kernels
+        import gptqmodel_exllamav2_kernels
 
         # Register op
         @reg_op(f"{namespace}::exv1_i4f16")
@@ -545,7 +547,7 @@ def exllama_ops_load_and_reg(qcfg=None, run_unit_test=False):
                 (x.shape[0], q4_width), dtype=torch.float16, device=x.device
             )
 
-            exllama_kernels.q4_matmul(x, q4, output)
+            gptqmodel_exllama_kernels.q4_matmul(x, q4, output)
             return output.view(outshape)
 
         # Abstract implementation
@@ -573,7 +575,9 @@ def exllama_ops_load_and_reg(qcfg=None, run_unit_test=False):
                 (x.shape[0], q4_width), dtype=torch.float16, device=x.device
             )
 
-            exllamav2_kernels.gemm_half_q_half(x, q_handle, output, force_cuda)
+            gptqmodel_exllamav2_kernels.gemm_half_q_half(
+                x, q_handle, output, force_cuda
+            )
             return output.view(outshape)
 
         # Abstract implementation
@@ -609,7 +613,9 @@ def exllama_ops_load_and_reg(qcfg=None, run_unit_test=False):
                 (x.shape[0], q4_width), dtype=torch.float16, device=x.device
             )
 
-            exllamav2_kernels.gemm_half_q_half(x, q_handle, output, force_cuda)
+            gptqmodel_exllamav2_kernels.gemm_half_q_half(
+                x, q_handle, output, force_cuda
+            )
             return output.view(outshape)
 
         # Abstract implementation
@@ -623,24 +629,28 @@ def exllama_ops_load_and_reg(qcfg=None, run_unit_test=False):
             )
 
         logger.info(
-            f"New AutoGPTQ gemm functions have been loaded and registered to torch.ops.{namespace}."
+            f"New GPTQModel gemm functions have been loaded and registered to \
+            torch.ops.{namespace}."
         )
         if qcfg:
-            qcfg["AUTOGPTQ_AVAILABLE"] = True
+            qcfg["GPTQMODEL_AVAILABLE"] = True
 
     if run_unit_test:
         return NotImplemented
 
 
 def imatmul_ops_reg(
-    useCUTLASS=True, mm_func=torch.matmul, AB_dtype=torch.float, D_dtype=torch.float
+    useINTkernel="triton",
+    mm_func=torch.matmul,
+    AB_dtype=torch.float,
+    D_dtype=torch.float,
 ):
     """This function will register a dummy Q_imatmul Op for better "graph representation".
     Args:
-        useCUTLASS: bool. choose to use a) real INT matmul using cutlass kernel or b) "simulated"
-                    imatmul using torch.matmul.
+        useINTkernel: str|bool. ["cutlass", "triton", False]. choose to use a) real INT matmul, e.g.
+                    cutlass or triton kernel or b) "simulated" imatmul using torch.matmul.
                     For b), could use D_dtype to select fp16 or fp32 accumulation
-        mm_func: matmul func to be used when useCUTLASS is True, should be a real callable kernel
+        mm_func: matmul func to be used when useINTkernel is True, should be a real callable kernel
                 from cutlass, but for debug purpose, could use torch.matmul as well.
         AB_dtype: datatype for input tensors
         D_dtype: datatype for accumulation and output tensor
@@ -697,10 +707,10 @@ def imatmul_ops_reg(
         tar_shape = tuple(m1.shape[:-1]) + (m2.shape[1],)
         m1 = m1.view(re_shape)
 
-        if useCUTLASS:
+        if useINTkernel in ["triton", "cutlass"]:
             assert (
                 m1.dtype == torch.int8 and m2.dtype == torch.int8
-            ), "When using cutlass int matmul, inputs must be 2D INT8"
+            ), "When using int matmul, inputs must be 2D and INT8."
             return mm_func(m1, m2).reshape(tar_shape)
 
         outf32_or_f16 = torch.empty(
@@ -759,7 +769,7 @@ def imatmul_ops_reg(
         assert m2.dtype == torch.int8, f"weight tensor is of incorrect dtype {m2.dtype}"
         m1 = torch.clamp((m1 / scale_i + zp_i - 128).round(), -128, 127).to(torch.int8)
 
-        if useCUTLASS:
+        if useINTkernel:
             mm_i32 = mm_func(m1, m2)
         else:
             outf32_or_f16 = torch.empty(
@@ -854,6 +864,99 @@ def lower_qmodel_cutlass(
     logger.info(f"\nModel lowered {'and compiled' if use_inductor else ''}.\n{mod}")
 
     return mod
+
+
+def lower_qmodel_triton(
+    model: torch.nn.Module,
+    use_dyn_max_act=False,
+    max_acc_bits=32,
+    clamp_acc_to_dl16=False,
+    num_lsb_to_truncate=0,
+    chunk_size=32,
+    layer_to_exclude=None,
+):
+    """
+    Examplar GPU lowering function using triton. Only swap Linear/Qlinear in transformers.
+    Triton kernel can be used to:
+    1. test INT8 or FP8 HW performance (kernel is not optimized)
+    2. simulate MSB/LSB truncation effect or special dtype (DL16) accumulation
+
+    Args:
+        model: nn.Module. should be a fms_mo Qmodel, will do inplace layer swapping, no deepcopy
+        use_dyn_max_act: bool or int, can be False or -1 for per-token, or -2 for perCh. will use
+                        dynamic max quantizer for activation if not False.
+        max_acc_bits: max bits for accumulator, typically FP32 for all FP matmuls and INT32 for all
+                        INT matmuls. But some HW could use fewer bits to trade-off power
+                        efficiency at the expense of higher chance of accumulation "overflow".
+                        For example, an INT24 accumulator can only hold values ranged from -2^23 to
+                        2^23 -1, as opposed to typical range -2^31 to -2^31 -1.
+        clamp_acc_to_dl16: clamp local accumulator to DL16 (1-6-9) range. To simulate this special
+                        dtype effect on accumulation.
+        num_lsb_to_truncate: number of bits to truncate from LSB side. For example, given fp32 is
+                        s1e8m23, if we choose to truncate 13 mantissa bits from right most side,
+                        i.e. LSB, the resulting number will be s1e8m10, which is TF32.
+        chunk_size: given a matmul of (m, k) @ (k, n), the inner product will be "accumulated" along
+                    k-dim. Since the entire matrix will be partitioned into smaller tiles when being
+                    computed, accumulator will only add a certain num of elements in one shot. This
+                    "chunk size" in k-dim will affect the overflow/underflow of accumulator.
+    """
+    # Third Party
+    from torch.ao.quantization.utils import _parent_name
+
+    # Local
+    from fms_mo.modules.linear import LinearFPxAcc, QLinear, QLinearINT8Deploy
+
+    # Currently QLinearINT8 has more options in dynamic quantization than LinearFP. Here we resolve
+    # the differences as a patch solution (will unify the codes in future release)
+    linFP_dyn_code = (
+        "per_token"
+        if use_dyn_max_act in [-1, -2]
+        else "per_tensor"
+        if use_dyn_max_act
+        else False
+    )
+
+    if layer_to_exclude is None:
+        layer_to_exclude = []
+    elif isinstance(layer_to_exclude, str):
+        layer_to_exclude = [
+            layer_to_exclude,
+        ]
+    elif not isinstance(layer_to_exclude, (list, tuple)):
+        raise RuntimeError("layer_to_exclude has to be either str, list, or tuple.")
+
+    for name, m in model.named_modules():
+        if not isinstance(m, (QLinear, torch.nn.Linear)) or name in layer_to_exclude:
+            continue
+        parent_name, module_name = _parent_name(name)
+        parent_mod = model.get_submodule(parent_name)
+
+        # Only support simulations of 1) QLinear -> INT8, 2) nnLinear->FP8 for now
+        if isinstance(m, QLinear):
+            new_lin = QLinearINT8Deploy.from_fms_mo(
+                m,
+                use_int_kernel="triton",
+                use_dynamic_max_act_Qfunc=use_dyn_max_act,
+                max_acc_bits=max_acc_bits,
+                truncate_lsb=num_lsb_to_truncate,
+                chunk_size=chunk_size,
+            )
+        else:
+            new_lin = LinearFPxAcc.from_nn(
+                m,
+                trun_bits=num_lsb_to_truncate,
+                chunk_size=chunk_size,
+                dynamic_fp8=linFP_dyn_code,
+                clamp_acc_to_dl16=clamp_acc_to_dl16,
+            )
+
+        setattr(
+            parent_mod,
+            module_name,
+            new_lin,
+        )
+
+    logger.info(f"\nModel lowering with triton kernel is done.\n{model}")
 
 
 ### -------------------------------------------------------------
@@ -1110,10 +1213,14 @@ def swap_nnlinear_to_quantlinear(model, qconfig, prefix=None, qlinear2use=None):
         QuantLinear = qlinear2use
     elif exVer == 1:
         # Third Party
-        from auto_gptq.nn_modules.qlinear.qlinear_exllama import QuantLinear
+        from gptqmodel.nn_modules.qlinear.exllama import (
+            ExllamaQuantLinear as QuantLinear,
+        )
     else:
         # Third Party
-        from auto_gptq.nn_modules.qlinear.qlinear_exllamav2 import QuantLinear
+        from gptqmodel.nn_modules.qlinear.exllamav2 import (
+            ExllamaV2QuantLinear as QuantLinear,
+        )
 
     num_swapped = 0
     for n, m in model.named_modules():

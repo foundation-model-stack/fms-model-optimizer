@@ -34,9 +34,12 @@ import traceback
 
 # Third Party
 from datasets import load_from_disk
-from huggingface_hub.errors import HFValidationError
 from torch.cuda import OutOfMemoryError
-from transformers import AutoTokenizer
+from transformers import (
+    AutoModelForMaskedLM,
+    AutoModelForQuestionAnswering,
+    AutoTokenizer,
+)
 import torch
 import transformers
 
@@ -85,12 +88,12 @@ def quantize(
 
     logger.info(f"{fms_mo_args}\n{opt_args.quant_method}\n")
 
-    if opt_args.quant_method == "gptq":
-        if not available_packages["auto_gptq"]:
+    if opt_args.quant_method in ["gptq", "gptqv2"]:
+        if not available_packages["gptqmodel"]:
             raise ImportError(
                 "Quantization method has been selected as gptq but unable to use external library, "
-                "auto_gptq module not found. For more instructions on installing the appropriate "
-                "package, see https://github.com/AutoGPTQ/AutoGPTQ?tab=readme-ov-file#installation"
+                "gptqmodel module not found. For more instructions on installing the appropriate "
+                "package, see https://github.com/ModelCloud/GPTQModel"
             )
         gptq_args.use_triton = gptq_args.use_triton and available_packages["triton"]
         run_gptq(model_args, data_args, opt_args, gptq_args)
@@ -100,7 +103,7 @@ def quantize(
                 "Quantization method has been selected as fp8 but unable to use external library, "
                 "llmcompressor module not found. \n"
                 "For more instructions on installing the appropriate package, see "
-                "https://github.com/vllm-project/llm-compressor/tree/"
+                "https://github.com/vllm-project/llm-compressor"
                 "main?tab=readme-ov-file#installation"
             )
         run_fp8(model_args, data_args, opt_args, fp8_args)
@@ -126,28 +129,44 @@ def run_gptq(model_args, data_args, opt_args, gptq_args):
     """
 
     # Third Party
-    from auto_gptq import AutoGPTQForCausalLM, BaseQuantizeConfig
-    from auto_gptq.modeling._const import SUPPORTED_MODELS
-    from auto_gptq.modeling.auto import GPTQ_CAUSAL_LM_MODEL_MAP
+    from gptqmodel import GPTQModel, QuantizeConfig
+    from gptqmodel.models.auto import MODEL_MAP, SUPPORTED_MODELS
+    from gptqmodel.utils.backend import BACKEND
 
     # Local
     from fms_mo.utils.custom_gptq_models import custom_gptq_classes
 
     logger = set_log_level(opt_args.log_level, "fms_mo.run_gptq")
 
-    quantize_config = BaseQuantizeConfig(
-        bits=gptq_args.bits,
-        group_size=gptq_args.group_size,
-        desc_act=gptq_args.desc_act,
-        damp_percent=gptq_args.damp_percent,
-    )
+    if opt_args.quant_method == "gptq":
+        quantize_config = QuantizeConfig(
+            bits=gptq_args.bits,
+            group_size=gptq_args.group_size,
+            desc_act=gptq_args.desc_act,
+            damp_percent=gptq_args.damp_percent,
+        )
+    else:
+        quantize_config = QuantizeConfig(
+            bits=gptq_args.bits,
+            group_size=gptq_args.group_size,
+            desc_act=gptq_args.desc_act,
+            damp_percent=gptq_args.damp_percent,
+            v2=True,
+            v2_memory_device="cpu",
+        )
 
-    # Add custom model_type mapping to auto_gptq LUT so AutoGPTQForCausalLM can recognize them.
+    # Add custom model_type mapping to gptqmodel LUT so GPTQModel can recognize them.
     for mtype, cls in custom_gptq_classes.items():
+        if mtype in MODEL_MAP:
+            logger.info(
+                f"Custom GPTQ model type {mtype} already exists in default MODEL_MAP.\n"
+                "The mapping for this type is overwritten by user defined type now."
+                "Please make sure this is the behavior you'd like to have."
+            )
         SUPPORTED_MODELS.append(mtype)
-        GPTQ_CAUSAL_LM_MODEL_MAP[mtype] = cls
+        MODEL_MAP[mtype] = cls
 
-    model = AutoGPTQForCausalLM.from_pretrained(
+    model = GPTQModel.from_pretrained(
         model_args.model_name_or_path,
         quantize_config=quantize_config,
         torch_dtype=model_args.torch_dtype,
@@ -166,9 +185,9 @@ def run_gptq(model_args, data_args, opt_args, gptq_args):
     start_time = time.time()
     model.quantize(
         data,
-        use_triton=gptq_args.use_triton,
+        backend=BACKEND.TRITON if gptq_args.use_triton else BACKEND.AUTO,
         batch_size=gptq_args.batch_size,
-        cache_examples_on_gpu=gptq_args.cache_examples_on_gpu,
+        calibration_enable_gpu_cache=gptq_args.cache_examples_on_gpu,
     )
 
     logger.info(
@@ -176,7 +195,7 @@ def run_gptq(model_args, data_args, opt_args, gptq_args):
     )
 
     logger.info(f"Saving quantized model and tokenizer to {opt_args.output_dir}")
-    model.save_quantized(opt_args.output_dir, use_safetensors=True)
+    model.save_quantized(opt_args.output_dir)
     tokenizer.save_pretrained(opt_args.output_dir)
 
 
@@ -193,14 +212,29 @@ def run_fp8(model_args, data_args, opt_args, fp8_args):
     """
 
     # Third Party
+    from llmcompressor import oneshot
     from llmcompressor.modifiers.quantization import QuantizationModifier
-    from llmcompressor.transformers import SparseAutoModelForCausalLM, oneshot
+    from llmcompressor.transformers import SparseAutoModelForCausalLM
 
     logger = set_log_level(opt_args.log_level, "fms_mo.run_fp8")
 
-    model = SparseAutoModelForCausalLM.from_pretrained(
-        model_args.model_name_or_path, torch_dtype=model_args.torch_dtype
-    )
+    if model_args.task_type == "lm":
+        model = SparseAutoModelForCausalLM.from_pretrained(
+            model_args.model_name_or_path,
+            torch_dtype=model_args.torch_dtype,
+        )
+    elif model_args.task_type == "qa":
+        model = AutoModelForQuestionAnswering.from_pretrained(
+            model_args.model_name_or_path,
+            torch_dtype=model_args.torch_dtype,
+        )
+    elif model_args.task_type == "mlm":
+        model = AutoModelForMaskedLM.from_pretrained(
+            model_args.model_name_or_path,
+            torch_dtype=model_args.torch_dtype,
+        )
+    else:
+        raise ValueError(f"Unsupported task: {model_args.task_type}")
     tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
 
     recipe = QuantizationModifier(
@@ -315,9 +349,11 @@ def main():
 
         logger = set_log_level(opt_args.log_level, __name__)
 
-        logger.debug(f"Input args parsed: \nmodel_args {model_args}, data_args {data_args}, \
-                     opt_args {opt_args}, fms_mo_args {fms_mo_args}, gptq_args {gptq_args}, \
-                     fp8_args {fp8_args}")
+        logger.debug(
+            f"Input args parsed: \nmodel_args {model_args}, data_args {data_args}, "
+            f"opt_args {opt_args}, fms_mo_args {fms_mo_args}, gptq_args {gptq_args}, "
+            f"fp8_args {fp8_args}"
+        )
     except Exception as e:  # pylint: disable=broad-except
         logger.error(traceback.format_exc())
         write_termination_log(
@@ -344,12 +380,6 @@ def main():
     except FileNotFoundError as e:
         logger.error(traceback.format_exc())
         write_termination_log(f"Unable to load file: {e}")
-        sys.exit(USER_ERROR_EXIT_CODE)
-    except HFValidationError as e:
-        logger.error(traceback.format_exc())
-        write_termination_log(
-            f"There may be a problem with loading the model. Exception: {e}"
-        )
         sys.exit(USER_ERROR_EXIT_CODE)
     except (TypeError, ValueError, EnvironmentError) as e:
         logger.error(traceback.format_exc())

@@ -11,9 +11,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""FMS Model Optimizer init. Import most commonly used functions and classes here."""
+"""FMS Model Optimizer version"""
 
-# Local
-from fms_mo.prep import qmodel_prep
-from fms_mo.utils.qconfig_utils import qconfig_init
-from fms_mo.version import __version__, __version_tuple__
+try:
+    # Local
+    from ._version import (  # pylint: disable=unused-import
+        __version__,
+        __version_tuple__,
+    )
+except ImportError as e:
+    # Standard
+    import warnings
+
+    warnings.warn(f"Failed to read commit hash:\n{e}", RuntimeWarning, stacklevel=2)
+
+    __version__ = "dev"
+    __version_tuple__ = (0, 0, __version__)

@@ -13,14 +13,20 @@
 # limitations under the License.
 """Utility functions for Direct Quantization" (DQ)."""
 
+# Standard
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 def config_quantize_smooth_layers(qcfg: dict):
     """Update qcfg with model-dependent config parameters:
     - qlayer_name_pattern: identifier of transformer layers containing linear layers
-    to quantize (if any, tracing is bypassed)
-    - scale_layers: identifier of linear layers to apply smoothquant on
+        to quantize (if any, tracing is bypassed)
     - qskip_layer_name: full name of linear layers that will not be quantized
-    - act_scale_path: path to save/load smoothquant activation scales
+    - smoothq_scale_layers: identifier of linear layers to apply smoothquant on
+    - smoothq_act_scale_path: path to save/load smoothquant activation scales, should be kept
+        Path(f"./act_scales/{qcfg['model'].replace('/', '-')}.pt"), no need to specify here.
 
     Selected model is determined by comparing all architecture identifiers against
     `model` and `model_type` fields in qcfg.
@@ -56,7 +62,7 @@ def config_quantize_smooth_layers(qcfg: dict):
         model in qcfg["model_type"] for model in llama_architecture
     ):
         qcfg["qlayer_name_pattern"] = ["model.layers."]
-        qcfg["scale_layers"] = ["k_proj", "v_proj", "gate_proj", "up_proj"]
+        qcfg["smoothq_scale_layers"] = ["k_proj", "v_proj", "gate_proj", "up_proj"]
         if qcfg["qskip_large_mag_layers"]:
             large_mag_layers = {
                 "2-7b": [1, 30],
@@ -75,13 +81,13 @@ def config_quantize_smooth_layers(qcfg: dict):
         model in qcfg["model_type"] for model in granite_architecture
     ):
         qcfg["qlayer_name_pattern"] = ["model.layers."]
-        qcfg["scale_layers"] = ["k_proj", "v_proj", "gate_proj", "up_proj"]
+        qcfg["smoothq_scale_layers"] = ["k_proj", "v_proj", "gate_proj", "up_proj"]
         # NOTE: supported granite-v3 models do not need layer skip for large magnitude
     elif "mixtral" in qcfg["model"]:
         qcfg["qlayer_name_pattern"] = (
             ["model.layers"] if qcfg["nbits_bmm1"] == 32 else []
         )
-        qcfg["scale_layers"] = ["q_proj", "k_proj", "v_proj", "w1", "w3"]
+        qcfg["smoothq_scale_layers"] = ["q_proj", "k_proj", "v_proj", "w1", "w3"]
         qcfg["qskip_layer_name"] += [
             f"model.layers.{i}.block_sparse_moe.gate" for i in range(32)
         ]
@@ -98,22 +104,22 @@ def config_quantize_smooth_layers(qcfg: dict):
                     [31, 7],
                 ]
             ]
-        qcfg["act_scale_path"] = "./act_scales/Mixtral-8x7B-v0.1.pt"
     elif any(model in qcfg["model"] for model in bigcode_architecture):
         qcfg["qlayer_name_pattern"] = ["transformer.h"]
-        qcfg["scale_layers"] = ["c_attn", "c_fc"]
+        qcfg["smoothq_scale_layers"] = ["c_attn", "c_fc"]
         # NOTE: supported bigcode models do not need layer skip for large magnitude
-        if "granite-3b-base-v2" in qcfg["model"]:
-            qcfg["act_scale_path"] = "./act_scales/granite_3b_base_v2_500_nw.pt"
-        if "granite-13b-base-v2" in qcfg["model"]:
-            qcfg["act_scale_path"] = "./act_scales/granite_13b_base_v2.pt"
-        if "granite-20b-code-base" in qcfg["model"]:
-            qcfg["act_scale_path"] = "./act_scales/graniteCodeHF_20b_base12.pt"
-        if "granite-20b-code-instruct" in qcfg["model"]:
-            qcfg["act_scale_path"] = "./act_scales/graniteCodeHF_20b_base12.pt"
-        if "granite-34b-code-base" in qcfg["model"]:
-            qcfg["act_scale_path"] = "./act_scales/graniteCodeHF_34b_base12.pt"
-        if "granite-34b-code-instruct" in qcfg["model"]:
-            qcfg["act_scale_path"] = "./act_scales/graniteCodeHF_34b_base12.pt"
+    elif "roberta" in qcfg["model"]:
+        qcfg["act_scale_path"] = "./act_scales"
+        qcfg["smoothq_scale_layers"] = [
+            "attention.self.query",
+            "attention.self.key",
+            "attention.self.value",
+            "intermediate.dense",
+        ]
+        qcfg["qskip_layer_name"] = []
+        qcfg["qlayer_name_pattern"] = ["roberta.encoder"]
     else:
-        raise ValueError("The model architecture is not supported for DQ.")
+        logger.info(
+            "The model architecture is not supported for DQ. No architecture-specific settings is"
+            "applied. All Linear layers will be quantized, which may not yield the optimal results."
+        )

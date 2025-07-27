@@ -28,7 +28,8 @@ import torch
 from fms_mo.calib import qmodel_calib
 from fms_mo.modules import QBmm_modules, QConv2d_modules, QLinear_modules, QLSTM_modules
 from fms_mo.quant.quantizers import Qbypass
-from fms_mo.utils.qconfig_utils import check_config, qconfig_save
+from fms_mo.utils.import_utils import available_packages
+from fms_mo.utils.qconfig_utils import check_config, qconfig_save, set_mx_specs
 from fms_mo.utils.utils import prepare_inputs
 
 # import numpy as np # only used in experimental func
@@ -177,7 +178,10 @@ def make_quant_module(module, curr_full_name, qcfg, verbose=False):
     is mappable, create a Qmodule and return, otherwise, return the original module. In the future,
     Qmodules need to have a .from_torch() or .from_nn() classmethod, and then this function will be
     greatly simplified.
-    NOTE: This func will check qskip_layer_name before creating the Qmodule
+    NOTE:
+    1. This func will check qskip_layer_name before creating the Qmodule
+    2. Qmodule will be created on "meta device" as a placeholder, which will skip params init and
+        mem alloc, as weights and bias will be reassigned to module.weight/.bias right after
 
     Args:
         module (nn.Module): the module which Qmodule will be based on
@@ -189,12 +193,24 @@ def make_quant_module(module, curr_full_name, qcfg, verbose=False):
         nn.Module: quantized module
     """
     mapping = qcfg.get("mapping")
+    mappable_classes = [cls for cls in mapping.keys() if not isinstance(cls, str)]
     # if mapping is not defined, qmodel_prep should raise alarm before entering QAnyNet4
     qdw = qcfg.get("qdw", False)
     nbits_a = qcfg.get("nbits_a", 32)
     nbits_w = qcfg.get("nbits_w", 32)
     qa_mode = qcfg.get("qa_mode", "pact+")
     qw_mode = qcfg.get("qw_mode", "sawb+")
+
+    # Check if MX has been set outside of qconfig_init without mx_specs being created
+    if (
+        available_packages["mx"]
+        and "mx_specs" not in qcfg
+        and (
+            (qcfg["qa_mode"].startswith("mx_") and qcfg["qw_mode"].startswith("mx_"))
+            or any(key.startswith("mx_") for key in qcfg.keys())
+        )
+    ):
+        set_mx_specs(qcfg, use_mx=True)
 
     # check if on "black list" (need to be exact match), can be skipped or quantized those
     # to slightly higher "default" precision, or use qspecial_layers to have fine control
@@ -211,14 +227,22 @@ def make_quant_module(module, curr_full_name, qcfg, verbose=False):
         qw_mode = qdict.get("qw_mode", qw_mode)
         # NOTE: if any item is not defined, use current default
 
-    if isinstance(module, tuple(mapping.keys())):
+    if isinstance(module, tuple(mappable_classes)):
         base_params = {}
         if hasattr(module, "__constants__"):
             base_params = {k: getattr(module, k) for k in module.__constants__}
             base_params["bias"] = getattr(module, "bias", None) is not None
-        base_params["device"] = next(module.parameters()).device  # usually cuda
+        base_params["device"] = "meta"
 
     module_output = module
+
+    # If (W,A) is (32,8) or (8,32), one nbits = None ; Do not quantize in this case
+    if nbits_a is None or nbits_w is None:
+        if verbose:
+            logger.info(
+                f"Skip quantization of {curr_full_name} - nbits_a or nbits_w is None"
+            )
+        return module_output
 
     # For nn.Conv2d
     if isinstance(module, nn.Conv2d):
@@ -231,14 +255,13 @@ def make_quant_module(module, curr_full_name, qcfg, verbose=False):
                 "Otherwise please create an equivalen QConv wrapper and change qcfg['mapping']."
             )
 
-        if mapping[nn.Conv2d]["from"] is None:
-            return module_output  # set from to None means no swap for this type
-
-        QConv = (
-            mapping[nn.Conv2d]["to"]
-            if isinstance(module, mapping[nn.Conv2d]["from"])
-            else mapping[nn.Conv2d]["otherwise"]
-        )
+        QConv = mapping.get(nn.Conv2d, None)
+        if QConv is None:
+            if verbose:
+                logger.info(
+                    f"Skip quantization of {curr_full_name} - mapping of Conv2d is None"
+                )
+            return module_output  # None means no swap for this type
 
         base_params.pop(
             "output_padding"
@@ -310,11 +333,13 @@ def make_quant_module(module, curr_full_name, qcfg, verbose=False):
                 "Otherwise please create an equivalen QConvT wrapper and change qcfg['mapping']."
             )
 
-        QConvT = (
-            mapping[nn.ConvTranspose2d]["to"]
-            if isinstance(module, mapping[nn.ConvTranspose2d]["from"])
-            else mapping[nn.ConvTranspose2d]["otherwise"]
-        )
+        QConvT = mapping.get(nn.ConvTranspose2d, None)
+        if QConvT is None:
+            if verbose:
+                logger.info(
+                    f"Skip quantization of {curr_full_name} - mapping of ConvTranspose2d is None"
+                )
+            return module_output  # None means no swap for this type
 
         if base_params["padding_mode"] != "zeros":
             logger.warning(
@@ -365,20 +390,20 @@ def make_quant_module(module, curr_full_name, qcfg, verbose=False):
 
     # For nn.Linear
     elif isinstance(module, nn.Linear):
-        QLin = (
-            None
-            if mapping[nn.Linear]["from"] is None
-            else (
-                mapping[nn.Linear]["to"]
-                if isinstance(module, mapping[nn.Linear]["from"])
-                else mapping[nn.Linear]["otherwise"]
+        if module.__class__ != nn.Linear:
+            logger.warning(
+                f"{curr_full_name} {type(module)} seems to be a wrapper of Linear."
+                "Please make sure it doesn't wrap BN and activ func."
+                "Otherwise please create an equivalen Linear wrapper and change qcfg['mapping']."
             )
-        )
-        if not QLin or nbits_a is None or nbits_w is None:
-            # no swapping
+
+        QLin = mapping.get(nn.Linear, None)
+        if QLin is None:
             if verbose:
-                logger.info(f"Skip quantization of {curr_full_name}")
-            return module_output
+                logger.info(
+                    f"Skip quantization of {curr_full_name} - mapping of Linear is None"
+                )
+            return module_output  # None means no swap for this type
 
         module_output = QLin(
             **base_params,
@@ -449,36 +474,36 @@ def make_quant_module(module, curr_full_name, qcfg, verbose=False):
 
     # For nn.LSTM
     elif isinstance(module, nn.LSTM):
-        Qlstm = (
-            None
-            if mapping[nn.LSTM]["from"] is None
-            else (
-                mapping[nn.LSTM]["to"]
-                if isinstance(module, mapping[nn.LSTM]["from"])
-                else mapping[nn.LSTM]["otherwise"]
+        if module.__class__ != nn.LSTM:
+            logger.warning(
+                f"{curr_full_name} {type(module)} seems to be a wrapper of LSTM."
+                "Please make sure it doesn't wrap BN and activ func."
+                "Otherwise please create an equivalen Linear wrapper and change qcfg['mapping']."
             )
-        )
-        if Qlstm:
-            if nbits_a is None or nbits_w is None:
-                if verbose:
-                    logger.info(f"Skip quantization of {curr_full_name}")
-            else:  # if globallayerID in qcfg["Qlist"]:
-                # 2nd safety check, check if on "white list", swap only if globalID is on Qlist
-                module_output = Qlstm(
-                    **base_params,
-                    num_bits_weight=qcfg["nbits_w_lstm"],
-                    qw_mode=qcfg["qw_mode_lstm"],
-                    num_bits_input=qcfg["nbits_i_lstm"],
-                    qi_mode=qcfg.get("qi_mode_lstm", qcfg["qa_mode_lstm"]),
-                    num_bits_hidden=qcfg["nbits_h_lstm"],
-                    qh_mode=qcfg.get("qh_mode_lstm", qcfg["qa_mode_lstm"]),
-                    align_zero=qcfg["align_zero"],
-                    qcfg=qcfg,
+
+        Qlstm = mapping.get(nn.LSTM, None)
+        if Qlstm is None:
+            if verbose:
+                logger.info(
+                    f"Skip quantization of {curr_full_name} - mapping of LSTM is None"
                 )
-                for k, v in module.named_parameters():
-                    if getattr(module, k, None):
-                        setattr(module_output, k, v)
-                module_output._all_weights = module._all_weights
+            return module_output  # None means no swap for this type
+
+        module_output = Qlstm(
+            **base_params,
+            num_bits_weight=qcfg["nbits_w_lstm"],
+            qw_mode=qcfg["qw_mode_lstm"],
+            num_bits_input=qcfg["nbits_i_lstm"],
+            qi_mode=qcfg.get("qi_mode_lstm", qcfg["qa_mode_lstm"]),
+            num_bits_hidden=qcfg["nbits_h_lstm"],
+            qh_mode=qcfg.get("qh_mode_lstm", qcfg["qa_mode_lstm"]),
+            align_zero=qcfg["align_zero"],
+            qcfg=qcfg,
+        )
+        for k, v in module.named_parameters():
+            if getattr(module, k, None):
+                setattr(module_output, k, v)
+        module_output._all_weights = module._all_weights
 
     # For nn.Embedding
     elif isinstance(module, nn.Embedding):
@@ -505,8 +530,17 @@ def q_any_net_5(model: nn.Module, qcfg: dict, verbose: bool = False):
     """
     # Third Party
     from torch.ao.quantization.utils import _parent_name
+    from tqdm import tqdm
 
-    for name, module in model.named_modules():
+    total_modules = len(list(model.named_modules()))
+    pbar = tqdm(
+        model.named_modules(),
+        total=total_modules,
+        desc="Mapping modules to target Qmodules.",
+    )
+    for name, module in pbar:
+        pbar.set_description(f"processing {name}")
+
         parent_module_name, curr_mod_name = _parent_name(name)
         new_module = make_quant_module(module, name, qcfg)
         parent_module = model.get_submodule(parent_module_name)
@@ -531,6 +565,7 @@ def q_any_net_5(model: nn.Module, qcfg: dict, verbose: bool = False):
             if verbose:
                 logger.info(f"Swap ({name}) from {type(module)} to {type(new_module)}")
 
+    pbar.close()
     return model
 
 
@@ -674,10 +709,13 @@ def qmodel_prep(
         import re
 
         qskip_layer_name, QsinglesidedConvs = [], []
+        mappable_classes = [
+            cls for cls in qcfg["mapping"].keys() if not isinstance(cls, str)
+        ]
         mappable_layers = [
             n
             for n, m in model.named_modules()
-            if isinstance(m, tuple(qcfg["mapping"].keys()))
+            if isinstance(m, tuple(mappable_classes))
         ]
         qskip_layer_name = set(mappable_layers)
 
@@ -875,7 +913,7 @@ def qmodel_prep(
             model, device_ids=DPorDDPdevices
         )
 
-    qconfig_save(qcfg, "qcfg.json")
+    qconfig_save(qcfg, fname="qcfg.json")
     qcfg["tb_writer"] = tb_writer
 
     logger.info(f"--- Quantized model --- \n{model}\n")

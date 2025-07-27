@@ -29,6 +29,7 @@ from fms_mo.fx.utils import (
     get_target_op_from_mod_or_str,
     get_target_op_from_node,
 )
+from fms_mo.utils.import_utils import available_packages
 
 logger = logging.getLogger(__name__)
 
@@ -1009,6 +1010,8 @@ def model_analyzer(
         }
         prefix = None
         if qcfg["N_backend_called"] > 1:  # subgraph found, see Note 2
+            # TODO this approach only works for FX IR (call_module nodes are not functionalized)
+            #       need an update for Aten IR cases
             for n in gm_fx.graph.nodes:
                 if n.op == "call_module":
                     mod = gm_fx.get_submodule(n.target)
@@ -1133,7 +1136,6 @@ def model_analyzer(
     from functools import partial
 
     # Third Party
-    from torchvision.models import VisionTransformer
     from transformers import PreTrainedModel
 
     if issubclass(type(model), torch.nn.Module):
@@ -1145,7 +1147,16 @@ def model_analyzer(
         model_to_be_traced = model
         model_param_size = 999
 
-    is_transformers = issubclass(type(model), (PreTrainedModel, VisionTransformer))
+    transformer_model_classes = (PreTrainedModel,)
+
+    if available_packages["torchvision"]:
+        # Third Party
+        # pylint: disable = import-error
+        from torchvision.models import VisionTransformer
+
+        transformer_model_classes += (VisionTransformer,)
+
+    is_transformers = issubclass(type(model), transformer_model_classes)
     if model_param_size > 1:
         # Standard
         import sys
@@ -1171,14 +1182,20 @@ def model_analyzer(
     if is_transformers:
         # NOTE simplified method to determine 1st/last modules for transformers.
         # will not work if model has multiple parallel heads at the end, e.g. obj det
-        def call_seq_hook(mod, *_args, **_kwargs):
-            qcfg["mod_call_seq"].append(lut_weight2modname[mod.weight])
+        def call_seq_hook(mod, *_args, **kwargs):
+            mod_name = kwargs.get("mod_name", lut_weight2modname.get(mod.weight, None))
+            if mod_name is None:
+                raise RuntimeError("cannot determine module name, plz check model.")
+
+            qcfg["mod_call_seq"].append(mod_name)
 
         h_hooks = []
         qcfg["mod_call_seq"] = []
         for n, m in model.named_modules():
             if isinstance(m, (torch.nn.Linear, torch.nn.Conv2d)):
-                h_hooks.append(m.register_forward_hook(call_seq_hook))
+                h_hooks.append(
+                    m.register_forward_hook(partial(call_seq_hook, mod_name=n))
+                )
 
         with torch.no_grad():
             run_fwd_once(model, sample_inp)
@@ -1188,11 +1205,13 @@ def model_analyzer(
 
         # only add last layer
         qcfg["qskip_layer_name"] += [qcfg["mod_call_seq"][-1]]
-        # unless it's a ViT, skip first Conv as well
-        if issubclass(type(model), VisionTransformer) and isinstance(
-            model.get_submodule(qcfg["mod_call_seq"][0]), torch.nn.Conv2d
-        ):
-            qcfg["qskip_layer_name"] += [qcfg["mod_call_seq"][0]]
+
+        if available_packages["torchvision"]:
+            # unless it's a ViT, skip first Conv as well
+            if issubclass(type(model), VisionTransformer) and isinstance(
+                model.get_submodule(qcfg["mod_call_seq"][0]), torch.nn.Conv2d
+            ):
+                qcfg["qskip_layer_name"] += [qcfg["mod_call_seq"][0]]
 
     with torch.no_grad():
         model_opt = torch.compile(
@@ -1209,6 +1228,37 @@ def model_analyzer(
     # ------ model analysis is finished, but there are a few remaining things to be done
 
     # a) qkvsync dict update from "module names" to "module instances"
+    #   NOTE when graph break happened, qkvsync() may only find partial QKV names. For example,
+    # as opposed to ["model.layers.0.self_attn.q_proj", ..., "model.layers.1.self_attn.q_proj", ...]
+    # it may report ["self_attn.q_proj", "self_attn.k_proj", ...]
+    # Therefore, length of qcfg["qkvsync_my_1st_sibling"] will be much shorter and keys of this dict
+    # won't exist in full list (like all_linears below).
+    all_linears = set(
+        n for n, m in model.named_modules() if isinstance(m, torch.nn.Linear)
+    )
+
+    if any(k not in all_linears for k in qcfg["qkvsync_my_1st_sibling"]):
+        # qcfg["qkvsync_my_1st_sibling"] dict is like {q:q, k:q, v:q,...}, here we need a simpler
+        # dict like {q:[q,k,v], gate:[up, gate]}
+        lut_all_siblings = {}
+        for me, sib_1st in qcfg["qkvsync_my_1st_sibling"].items():
+            if sib_1st not in lut_all_siblings:
+                lut_all_siblings[sib_1st] = [sib_1st]
+            elif me not in lut_all_siblings[sib_1st]:
+                lut_all_siblings[sib_1st].append(me)
+
+        full_sib_list = {}
+        for me, all_sibs in lut_all_siblings.items():
+            partial_matches = [lin for lin in all_linears if me in lin]
+            # here lin is full_name, me and all_sibs are partial
+            for lin in partial_matches:
+                prefix = lin[: lin.index(me)]
+                for sib in all_sibs:
+                    full_sib_list[prefix + sib] = prefix + me
+                    all_linears.remove(prefix + sib)
+        # all_linears will still have down_proj, out_proj, lm_head, and maybe others
+        qcfg["qkvsync_my_1st_sibling"] = full_sib_list
+
     updated_dict = {
         model.get_submodule(mod): model.get_submodule(sib)
         for mod, sib in qcfg["qkvsync_my_1st_sibling"].items()
@@ -1218,7 +1268,7 @@ def model_analyzer(
     # b) qbmm creation and attaching to model
     if qcfg.get("QBmm"):  # see Note 4
         # Local
-        from fms_mo.modules import QBmm
+        QBmm = qcfg["mapping"]["matmul_or_bmm"]
 
         qcfg["which2patch_contextmanager"] = qcfg["bmm_prep"][
             "which2patch_contextmanager"
@@ -1271,26 +1321,28 @@ def model_analyzer(
     # c) identify RPN/FPN
     # TODO this hack only works for torchvision models. will use find_rpn_fpn_gm()
 
-    # Third Party
-    from torchvision.models.detection.rpn import RegionProposalNetwork
-    from torchvision.ops import FeaturePyramidNetwork
+    if available_packages["torchvision"]:
+        # Third Party
+        # pylint: disable = import-error
+        from torchvision.models.detection.rpn import RegionProposalNetwork
+        from torchvision.ops import FeaturePyramidNetwork
 
-    rpnfpn_prefix = []
-    rpnfpn_convs = []
-    for n, m in model.named_modules():
-        if isinstance(m, (FeaturePyramidNetwork, RegionProposalNetwork)):
-            rpnfpn_prefix.append(n)
-        if isinstance(m, torch.nn.Conv2d) and any(
-            n.startswith(p) for p in rpnfpn_prefix
-        ):
-            rpnfpn_convs.append(n)
-            if n not in qcfg["qskip_layer_name"]:
-                qcfg["qskip_layer_name"].append(n)
+        rpnfpn_prefix = []
+        rpnfpn_convs = []
+        for n, m in model.named_modules():
+            if isinstance(m, (FeaturePyramidNetwork, RegionProposalNetwork)):
+                rpnfpn_prefix.append(n)
+            if isinstance(m, torch.nn.Conv2d) and any(
+                n.startswith(p) for p in rpnfpn_prefix
+            ):
+                rpnfpn_convs.append(n)
+                if n not in qcfg["qskip_layer_name"]:
+                    qcfg["qskip_layer_name"].append(n)
 
     if qcfg["N_backend_called"] > 1:
         logger.warning(
             f"Found {qcfg['N_backend_called']} graph breaks during Dynamo tracing!! \n"
-            f"First/Last layer, which usually needs to stay unquantized, cannot be identified"
+            f"First/Last layer, which usually needs to stay unquantized, may not be identified"
             f" correctly now. Please double-check layers being skipped:\n"
             f"{qcfg['qskip_layer_name']}\n NOTE: Users can control layer selection by adding layer"
             f"names to:\n"

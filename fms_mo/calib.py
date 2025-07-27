@@ -574,13 +574,19 @@ def qmodel_calib(
                     f"Qmodel calibration (clip_val analysis) in progress: {i}/{Nbatch}"
                 )
 
-        if "perCh" not in qcfg["qw_mode"]:
-            cv_sum_dict = {"layer": [], "value": []}
-            for k, v in tempmodel.state_dict().items():
-                if "clip" in k:
-                    cv_sum_dict["layer"].append(k)
-                    cv_sum_dict["value"].append(v.item())
-            logger.info(f"Observed clipvals: \n{ pd.DataFrame(cv_sum_dict) }")
+        cv_sum_dict = {"layer": [], "value": []}
+        for k, v in tempmodel.state_dict().items():
+            if "clip" not in k:
+                continue
+
+            if v.numel() > 1:
+                k = k + "*"
+                v = v.mean()
+            cv_sum_dict["layer"].append(k)
+            cv_sum_dict["value"].append(v.item())
+        logger.info(
+            f"Observed clipvals: ('*' if it's a vector) \n{ pd.DataFrame(cv_sum_dict) }"
+        )
 
     # Step 3: extract new clip_vals, params and buffers, then remove handles if needed
     temp_new_clipvals = {

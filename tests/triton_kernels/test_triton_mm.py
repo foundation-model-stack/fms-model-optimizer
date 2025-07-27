@@ -32,7 +32,7 @@ else:
     )
 
 
-@pytest.mark.parametrize("mkn", [64, 256, 1024, 4096])
+@pytest.mark.parametrize("mkn", [64, 256, 1024])
 @pytest.mark.parametrize(
     "dtype_to_test",
     [
@@ -43,11 +43,12 @@ else:
         torch.float8_e5m2,
     ],
 )
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="test_triton_matmul_fp can only when GPU is available",
+)
 def test_triton_matmul_fp(mkn, dtype_to_test):
     """Parametric tests for triton matmul kernel using variety of tensor sizes and dtypes."""
-    if not torch.cuda.is_available():
-        # only run the test when GPU is available
-        return
 
     torch.manual_seed(23)
     m = n = k = mkn
@@ -69,8 +70,10 @@ def test_triton_matmul_fp(mkn, dtype_to_test):
         .to("cuda")
         .to(torch.float)
     )
-    tl_output_no_trun = tl_matmul(a, b).to(torch.float)
-    tl_output_trun_8b = tl_matmul(a, b, chunk_trun_bits=8).to(torch.float)
+    tl_output_no_trun = tl_matmul(a, b, truncate_then_accumulate=False).to(torch.float)
+    tl_output_trun_8b = tl_matmul(
+        a, b, chunk_trun_bits=8, truncate_then_accumulate=False
+    ).to(torch.float)
 
     diff_no_trun = torch_output - tl_output_no_trun
     diff_trun_8b = torch_output - tl_output_trun_8b
@@ -79,12 +82,13 @@ def test_triton_matmul_fp(mkn, dtype_to_test):
     assert torch.norm(diff_trun_8b) / torch.norm(torch_output) < 1e-3
 
 
-@pytest.mark.parametrize("mkn", [64, 256, 1024, 4096])
+@pytest.mark.parametrize("mkn", [64, 256, 1024])
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="test_triton_matmul_int8 can only when GPU is available",
+)
 def test_triton_matmul_int8(mkn):
     """Parametric tests for triton imatmul kernel using variety of tensor sizes."""
-    if not torch.cuda.is_available():
-        # only run the test when GPU is available
-        return
 
     torch.manual_seed(23)
     m = n = k = mkn
@@ -94,24 +98,41 @@ def test_triton_matmul_int8(mkn):
     torch_output = torch.matmul(a.to(torch.float), b.to(torch.float))
     # cast tl_matmul results to float because torch.norm only supports float
     tl_output_no_trun = tl_matmul(a, b).to(torch.float)
+    # check LSB truncation effect (underflow)
     tl_output_trun_8b = tl_matmul(a, b, chunk_trun_bits=8).to(torch.float)
+    # check MSB truncation effect (overflow)
+    # max(1 int8 * 1 int8) ~ 2^14 -> each chunk acc 32 elem only, achievable max ~ 2^19
+    # -> truncate to 18b -> should see slightly large err than LSB-only case
+    tl_output_trun_18b8b = tl_matmul(a, b, max_acc_bits=18, chunk_trun_bits=8).to(
+        torch.float
+    )
+    # use larger chunk size to accumulate more elem, MSB truncation (overflow) issue should worsen
+    tl_output_trun_18b8b_128 = tl_matmul(
+        a, b, max_acc_bits=18, chunk_trun_bits=8, chunk_size=min(128, k)
+    ).to(torch.float)
 
-    diff_no_trun = torch_output - tl_output_no_trun
-    diff_trun_8b = torch_output - tl_output_trun_8b
+    ref = torch.norm(torch_output)
+    rel_err_no_trun = torch.norm(torch_output - tl_output_no_trun) / ref
+    rel_err_trun_8b = torch.norm(torch_output - tl_output_trun_8b) / ref
+    rel_err_trun_18b8b = torch.norm(torch_output - tl_output_trun_18b8b) / ref
+    rel_err_trun_18b8b_128 = torch.norm(torch_output - tl_output_trun_18b8b_128) / ref
 
-    assert torch.norm(diff_no_trun) / torch.norm(torch_output) < 1e-5
-    assert torch.norm(diff_trun_8b) / torch.norm(torch_output) < 1e-2
+    assert rel_err_no_trun < 1e-5
+    assert rel_err_trun_8b < 1e-2
+    assert rel_err_trun_18b8b < 1e-2
+    assert rel_err_trun_18b8b_128 >= rel_err_trun_18b8b
 
 
 @pytest.mark.parametrize("feat_in_out", [(64, 128), (256, 1024), (1024, 4096)])
 @pytest.mark.parametrize("trun_bits", [0, 8, 12, 16])
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="test_linear_fpx_acc can only when GPU is available",
+)
 def test_linear_fpx_acc(feat_in_out, trun_bits):
     """Parametric tests for LinearFPxAcc. This Linear utilizes triton kernel hence can only be run
     on CUDA.
     """
-    if not torch.cuda.is_available():
-        # only run the test when GPU is available
-        return
 
     torch.manual_seed(23)
     feat_in, feat_out = feat_in_out

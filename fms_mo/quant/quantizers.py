@@ -134,6 +134,7 @@ def get_activation_quantizer(
             )
         elif qa_mode == "dorefa":
             act_quantizer = dorefa_quantize_activation
+
         elif "max" in qa_mode:
             # NOTE Need to be careful using this for activation, particular to 1 sided.
             if "min" in qa_mode:
@@ -455,7 +456,7 @@ class SAWB(nn.Module):
             else:
                 self.quantizer = SAWBSTE
 
-    def forward(self, input_tensor):
+    def forward(self, input_tensor: torch.Tensor) -> torch.Tensor:
         input_tensor = self.quantizer.apply(
             input_tensor,
             self.num_bits,
@@ -3056,7 +3057,7 @@ class Qmax(nn.Module):
             self.register_buffer("clip_valn", torch.zeros(perGp[0]))
         else:
             self.register_buffer(
-                "clip_val", torch.zeros(perCh) if perCh else torch.Tensor([1.0])
+                "clip_val", torch.zeros(perCh) if perCh else torch.Tensor([0.0])
             )
             self.register_buffer(
                 "clip_valn", torch.zeros(perCh) if perCh else torch.Tensor([0.0])
@@ -3210,9 +3211,7 @@ class QmaxPerChSTE(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(
-        ctx, input_tensor, num_bits, _dequantize, inplace, cv, _cvn, align_zero
-    ):
+    def forward(ctx, input_tensor, num_bits, dequantize, inplace, cv, _cvn, align_zero):
         if inplace:
             ctx.mark_dirty(input_tensor)
         scale = (2**num_bits - 2) if align_zero else (2**num_bits - 1)
@@ -3233,6 +3232,9 @@ class QmaxPerChSTE(torch.autograd.Function):
             quant_min=int_l,
             quant_max=int_u,
         ).to(input_tensor.dtype)
+
+        if not dequantize:
+            return (output.t() / scale).t()
         return output
 
     @staticmethod
@@ -3502,11 +3504,14 @@ class PerTokenMax(nn.Module):
         """
         super().__init__()
         self.num_bits = num_bits
+        self.register_buffer("clip_val", torch.Tensor([0.0]))
+        self.register_buffer("clip_valn", torch.Tensor([0.0]))
 
     def forward(self, input_tensor):
-        scales = input_tensor.abs().max(dim=-1, keepdim=True)[0]
+        self.clip_val = input_tensor.abs().max(dim=-1, keepdim=True)[0]
+        self.clip_valn = -self.clip_val
         levels = 2 ** (self.num_bits - 1) - 1
-        scales.clamp_(min=1e-5).div_(levels)
+        scales = self.clip_val.clamp(min=1e-5).div(levels)
         input_tensor.div_(scales).round_().mul_(scales)
         return input_tensor
 

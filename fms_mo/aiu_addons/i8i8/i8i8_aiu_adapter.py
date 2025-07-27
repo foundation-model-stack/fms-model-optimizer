@@ -17,8 +17,20 @@
 from typing import Mapping
 
 # Third Party
-from fms.utils import serialization
 import torch
+
+# Local
+from fms_mo.utils.import_utils import available_packages
+
+if not available_packages["fms"]:
+    raise ImportError(
+        "AIU functionality requires ibm-fms to be installed."
+        "See https://github.com/foundation-model-stack/foundation-model-stack for details."
+    )
+
+# Third Party
+# pylint: disable=import-error,wrong-import-position
+from fms.utils import serialization
 
 
 def _int8_qparams_aiu(

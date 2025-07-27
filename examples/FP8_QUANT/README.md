@@ -92,7 +92,8 @@ This end-to-end example utilizes the common set of interfaces provided by `fms_m
 
     ```python
     from llmcompressor.modifiers.quantization import QuantizationModifier
-    from llmcompressor.transformers import SparseAutoModelForCausalLM, oneshot
+    from llmcompressor.transformers import SparseAutoModelForCausalLM
+    from llmcompressor import oneshot
 
     model = SparseAutoModelForCausalLM.from_pretrained(model_args.model_name_or_path, torch_dtype=model_args.torch_dtype)
     tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)

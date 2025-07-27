@@ -55,6 +55,17 @@ class ModelArguments(TypeChecker):
     """Dataclass for model related arguments."""
 
     model_name_or_path: str = field(default="facebook/opt-125m")
+    task_type: str = field(
+        default="lm",
+        metadata={
+            "choices": ["lm", "qa", "mlm"],
+            "help": (
+                "Instantiate model for selected task: 'lm' (language modeling), 'qa' "
+                "(question answering, for encoders), 'mlm' (masked language modeling, "
+                "for encoders)."
+            ),
+        },
+    )
     torch_dtype: str = field(default="bfloat16")
     device_map: Optional[str] = field(
         default=None,
@@ -127,7 +138,10 @@ class OptArguments(TypeChecker):
     """Dataclass for optimization related arguments."""
 
     quant_method: str = field(
-        metadata={"choices": ["gptq", "fp8", "dq"], "help": "Quantization technique"}
+        metadata={
+            "choices": ["gptq", "gptqv2", "fp8", "dq"],
+            "help": "Quantization technique",
+        }
     )
     output_dir: str = field(
         metadata={
@@ -137,6 +151,14 @@ class OptArguments(TypeChecker):
     log_level: str = field(
         default="INFO",
         metadata={"help": "The log level to adopt during optimization."},
+    )
+    save_ckpt: bool = field(
+        default=True,
+        metadata={"help": "Save quantized checkpoint."},
+    )
+    save_ckpt_for_aiu: bool = field(
+        default=False,
+        metadata={"help": "Prepare and save AIU-compliant checkpoint."},
     )
 
 
@@ -173,11 +195,25 @@ class FMSMOArguments(TypeChecker):
         default=2048, metadata={"help": "input sequence length after tokenization"}
     )
     eval_ppl: bool = field(default=False)
+    aiu_sim_triton: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": (
+                "AIU simulation with triton kernel. ['int8', 'fp8', None]\n"
+                "'int8' mode will trigger qmodel_prep() and swap QLinears"
+                "'fp8' mode will directly replace existing nn.Linears"
+            )
+        },
+    )
+    recompute_narrow_weights: bool = field(
+        default=False,
+        metadata={"help": "Apply recomputation during checkpoint saving for AIU."},
+    )
 
 
 @dataclass
 class GPTQArguments(TypeChecker):
-    """Dataclass for GPTQ related arguments that will be used by auto-gptq."""
+    """Dataclass for GPTQ related arguments that will be used by gptqmodel."""
 
     bits: int = field(default=4, metadata={"choices": [2, 3, 4, 8]})
     group_size: int = field(default=-1)

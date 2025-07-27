@@ -15,8 +15,20 @@
 """This file contains external kernels for FP and INT8 matmul written in triton."""
 
 # Third Party
-from triton.language.extra import libdevice
 import torch
+
+# Local
+from fms_mo.utils.import_utils import available_packages
+
+# Assume any calls to the file are requesting triton
+if not available_packages["triton"]:
+    raise ImportError(
+        "triton python package is not avaialble, please check your installation."
+    )
+
+# Third Party
+# pylint: disable=wrong-import-position
+from triton.language.extra import libdevice
 import triton
 import triton.language as tl
 
@@ -101,6 +113,8 @@ def matmul_kernel(
     stride_cm,
     stride_cn,
     chunk_trun_bits,
+    max_acc_bits,  # pylint: disable=unused-argument
+    clamp_acc_to_dl16,
     truncate_then_accumulate,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
@@ -146,13 +160,8 @@ def matmul_kernel(
     # We accumulate into a `[BLOCK_SIZE_M, BLOCK_SIZE_N]` block
     # of fp32 values for higher accuracy.
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    ## ------ prepare LSB rounding/truncation masks -------
-    # NOTE mask will be applied on accumulator, which is alway FP32, so we may truncate up to 23b
-    # e.g., 20b -> trun_mask = 0xFFF00000, round_bit = 0x00080000
-    #        8b -> trun_mask = 0xFFFFFF00, round_bit = 0x00000080
-    trun_mask = tl.cast((0xFFFFFFFF >> chunk_trun_bits) << chunk_trun_bits, tl.uint32)
-    round_bit = 1 << (chunk_trun_bits - 1) if chunk_trun_bits > 0 else 0
-    ## ---------------------------------------------------------
+    ## ------ prepare LSB rounding/truncation masks outside the for loop -------
+    round_bit, trun_mask = round_and_trun_mask(chunk_trun_bits, clamp_acc_to_dl16)
 
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         # Load the next block of A and B, generate a mask by checking the K dimension.
@@ -167,8 +176,10 @@ def matmul_kernel(
         # tl.dot() default is using TF32 approximation, not good enough for LSB truncation exp
 
         ## ------ add chunky LSB rounding/masking --------
-        if chunk_trun_bits > 0:
-            accumulator_inner = round_and_trun(accumulator_inner, round_bit, trun_mask)
+        if clamp_acc_to_dl16 or chunk_trun_bits > 0:
+            accumulator_inner = round_and_trun(
+                accumulator_inner, round_bit, trun_mask, clamp_acc_to_dl16
+            )
         ## ---------------------------------------------------------
         if truncate_then_accumulate:
             accumulator += accumulator_inner
@@ -212,6 +223,8 @@ def imatmul_kernel(
     stride_cm,
     stride_cn,
     chunk_trun_bits,
+    max_acc_bits,
+    clamp_acc_to_dl16,  # pylint: disable=unused-argument
     truncate_then_accumulate,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
@@ -220,8 +233,8 @@ def imatmul_kernel(
     GROUP_SIZE_M: tl.constexpr,
     ACTIVATION: tl.constexpr,
 ):
-    """Kernel for computing the INT matmul C = A x B that include LSB truncation. A and B should be
-    INT8, C should be INT32. (Pretty much the same code as float version.)
+    """Kernel for computing the INT matmul D = A x B + C that include LSB truncation and MSB
+    clamping. A and B should be INT8, C/D should be INT32. (similar to the float version.)
     A has shape (M, K), B has shape (K, N) and C has shape (M, N)
     Args:
         chunk_trun_bits (int): number of LSBs to truncate/round.
@@ -238,14 +251,20 @@ def imatmul_kernel(
 
     offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     offs_k = tl.arange(0, BLOCK_SIZE_K)
     a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
     b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
 
-    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.int32)
-    ## ------ prepare LSB rounding/truncation masks -------
+    # accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.int32)
+    accumulator = tl.load(c_ptrs, mask=c_mask, other=0.0)
+    ## ------ prepare MSB/LSB rounding/truncation masks -------
     round_bit = 1 << (chunk_trun_bits - 1) if chunk_trun_bits > 0 else 0
-    # msb_mask = 0x00FFFFFF  # only needed when simulating truncation on MSB
+    acc_min = -(1 << (max_acc_bits - 1))
+    acc_max = -acc_min - 1
     ## ---------------------------------------------------------
 
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
@@ -256,7 +275,12 @@ def imatmul_kernel(
         else:
             accumulator_inner = tl.dot(a, b, accumulator, input_precision="ieee")
 
-        ## ------ add chunky LSB rounding/masking --------
+        ## ------ INT MSB truncation is simulated by clamping,
+        #           "special" INT LSB truncation by right and left shift --------
+        if max_acc_bits < 32:
+            accumulator_inner = tl.maximum(
+                tl.minimum(accumulator_inner, acc_max), acc_min
+            )
         if chunk_trun_bits != 0:
             accumulator_inner = (accumulator_inner + round_bit) >> chunk_trun_bits
             accumulator_inner = accumulator_inner << chunk_trun_bits
@@ -275,8 +299,6 @@ def imatmul_kernel(
 
     offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
-    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
     tl.store(c_ptrs, c, mask=c_mask)
 
 
@@ -300,6 +322,8 @@ def matmul_kernel_DABC(
     stride_cm,
     stride_cn,
     chunk_trun_bits,
+    max_acc_bits,  # pylint: disable=unused-argument
+    clamp_acc_to_dl16,
     truncate_then_accumulate,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
@@ -353,13 +377,8 @@ def matmul_kernel_DABC(
     # We accumulate into a `[BLOCK_SIZE_M, BLOCK_SIZE_N]` block
     # of fp32 values for higher accuracy, i.e. C should have been cast to fp32 already
     accumulator = tl.load(c_ptrs, mask=c_mask, other=0.0)
-    ## ------ prepare LSB rounding/truncation masks -------
-    # NOTE mask will be applied on accumulator, which is alway FP32, so we may truncate up to 23b
-    # e.g., 20b -> trun_mask = 0xFFF00000, round_bit = 0x00080000
-    #        8b -> trun_mask = 0xFFFFFF00, round_bit = 0x00000080
-    trun_mask = tl.cast((0xFFFFFFFF >> chunk_trun_bits) << chunk_trun_bits, tl.uint32)
-    round_bit = 1 << (chunk_trun_bits - 1) if chunk_trun_bits > 0 else 0
-    ## ---------------------------------------------------------
+    ## ------ prepare LSB rounding/truncation masks outside the for loop -------
+    round_bit, trun_mask = round_and_trun_mask(chunk_trun_bits, clamp_acc_to_dl16)
 
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         # Load the next block of A, B, and C, generate a mask by checking the K dimension.
@@ -379,8 +398,10 @@ def matmul_kernel_DABC(
         #       precision as well, hence, could lose some precision!
 
         ## ------ add chunky LSB rounding/masking --------
-        if chunk_trun_bits > 0:
-            accumulator_inner = round_and_trun(accumulator_inner, round_bit, trun_mask)
+        if clamp_acc_to_dl16 or chunk_trun_bits > 0:
+            accumulator_inner = round_and_trun(
+                accumulator_inner, round_bit, trun_mask, clamp_acc_to_dl16
+            )
         ## ---------------------------------------------------------
         if truncate_then_accumulate:
             accumulator += accumulator_inner
@@ -409,9 +430,39 @@ def leaky_relu(x):
 
 
 @triton.jit
-def round_and_trun(x, round_bit, trun_mask):
+def round_and_trun_mask(chunk_trun_bits, clamp_acc_to_dl16):
+    """
+    Rounding and LSB truncation masks only need to be generated once.
+    These mask will be applied on "inner" accumulator, which is alway FP32 (e8m23). We may truncate
+    up to 23b for mantissa. If DL16/DL8, pay attention to exponent bias.
+    Examples: 20b -> trun_mask = 0xFFF00000, round_bit = 0x00080000
+               8b -> trun_mask = 0xFFFFFF00, round_bit = 0x00000080
+    """
+    if clamp_acc_to_dl16:
+        # DL16 is e6m9, hence, truncate 23 - 9 = 14 bits
+        chunk_trun_bits = 14
+    round_bit = 1 << (chunk_trun_bits - 1) if chunk_trun_bits > 0 else 0
+    trun_mask = ~tl.cast((1 << chunk_trun_bits) - 1, tl.uint32)
+    return round_bit, trun_mask
+
+
+@triton.jit
+def round_and_trun(x, round_bit, trun_mask, clamp_acc_to_dl16):
     """Round and truncate (usually for accumulator)."""
-    return libdevice.uint_as_float((libdevice.float_as_uint(x) + round_bit) & trun_mask)
+    x = libdevice.uint_as_float((libdevice.float_as_uint(x) + round_bit) & trun_mask)  # pylint: disable=assignment-from-no-return
+
+    if clamp_acc_to_dl16:
+        # clamp to DL16 min/max:
+        #   max = 2^32 * 1.(1111 1111 0)_base2 = 2^32*(2 - 2^-9) = 8581545984.0
+        #         greater than this will become +inf (or -inf)
+        #   min = 2^-31 * 1.(0000 0000 1)_base2 = 2^-31*(1 + 2^-9)> = 4.665707820095122e-10
+        #         smaller than this will become 0
+        dl16_max = 8581545984.0
+        dl16_min = 4.665707820095122e-10
+        x = tl.where(x >= dl16_max, float("inf"), x)
+        x = tl.where(x <= -dl16_max, float("-inf"), x)
+        x = tl.where(tl.abs(x) < dl16_min, 0, x)
+    return x
 
 
 def tl_matmul_chunk_truncate(
@@ -421,8 +472,10 @@ def tl_matmul_chunk_truncate(
     activation="",
     chunk_trun_bits=0,
     chunk_size=16,
+    max_acc_bits=32,
     truncate_then_accumulate=True,
     cast_output_to_input_dtype=None,
+    clamp_acc_to_dl16=False,
 ):
     """Triton matmul for HW behavior simulation. Supports float and int8.
     i. variable chunk size (i.e., BLOCK_SIZE_K)
@@ -434,6 +487,10 @@ def tl_matmul_chunk_truncate(
         activation (str, optional): activation func to be fused, see relu example.
         chunk_trun_bits (int, optional): number of LSBs to be truncated/rounded.
         chunk_size (int, optional): BLOCK_SIZE_K, some HW has specific chunk size. must >= 16.
+        max_acc_bits (int, optional): num of bits for the accumulator, e.g. if INT24 is used, will
+                                        clamp each chunk of a*b to [-2**23-1, 2**23].
+                                        (only used by INT)
+        clamp_acc_to_dl16(bool): Only used by FP8, whether to clamp local accumulator (FP32) to DL16
         truncate_then_accumulate (bool, optional): if True, c = truncate(a*b) + c, otherwise
                                                     c = truncate(a*b+c)
         cast_output_to_input_dtype (bool, optional): accumulator has higher prec than input, usually
@@ -445,7 +502,7 @@ def tl_matmul_chunk_truncate(
 
     NOTE:
     use empirical way to determine BLOCK sizes, may not be optimal. But need to avoid autotune for
-    real model inference. otherwise auto-tune will be triggered in every forward call.
+    real model inference. otherwise auto-tune may be triggered in every forward call.
     """
 
     # Check constraints.
@@ -472,9 +529,9 @@ def tl_matmul_chunk_truncate(
 
     # because min k (chunk size in this case) for fp16/bf16 is 16, if smaller is needed, we could
     # insert 0s in between elements, e.g. pad [m,k] -> [m,2k], [k,n]->[2k,n], out=[m,n] unchanged.
-    # Do not support INT8 for now.
     if chunk_size == 8 and a.dtype in [
         torch.float8_e4m3fn,
+        torch.int8,
         torch.float16,
         torch.bfloat16,
     ]:
@@ -515,7 +572,6 @@ def tl_matmul_chunk_truncate(
         c_org_dtype = c.dtype
         c = c.to(acc_dtype)
         assert c.shape[0] == M and c.shape[1] == N, "C shape is inconsistent with A B."
-        assert acc_dtype == torch.float32, "INT truncation is not yet supported."
 
     # 1D launch kernel where each block gets its own program.
     def grid(META):
@@ -556,6 +612,8 @@ def tl_matmul_chunk_truncate(
         c.stride(0),
         c.stride(1),
         chunk_trun_bits=chunk_trun_bits,
+        max_acc_bits=max_acc_bits,
+        clamp_acc_to_dl16=clamp_acc_to_dl16,
         truncate_then_accumulate=truncate_then_accumulate,
         ACTIVATION=activation,
         **kernel_config,  # if using auto-tune, comment this line out.

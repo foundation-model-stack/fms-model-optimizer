@@ -63,9 +63,9 @@ ignore-patterns=^\.#
 # (useful for modules/projects where namespaces are manipulated during runtime
 # and thus existing member attributes cannot be deduced by static analysis). It
 # supports qualified module names, as well as Unix pattern matching.
-ignored-modules=auto_gptq,                
-                exllama_kernels,
-                exllamav2_kernels,
+ignored-modules=gptqmodel,                
+                gptqmodel_exllama_kernels,
+                gptqmodel_exllamav2_kernels,
                 llmcompressor,
                 cutlass_mm,
                 pygraphviz,
@@ -94,7 +94,7 @@ persistent=yes
 
 # Minimum Python version to use for version dependent checks. Will default to
 # the version used to run pylint.
-py-version=3.9
+py-version=3.10
 
 # Discover python modules and packages in the file system subtree.
 recursive=no

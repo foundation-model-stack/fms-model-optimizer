@@ -1,6 +1,6 @@
 [build-system]
 build-backend = "setuptools.build_meta"
-requires = ["setuptools>=60", "setuptools-scm>=8.0"]
+requires = ["setuptools>=64", "setuptools-scm>=8.0"]
 
 [project]
 name = "fms-model-optimizer"
@@ -23,31 +23,29 @@ classifiers=[
 dynamic = ["version"]
 dependencies = [
 "numpy>=1.26.4,<2.3.0",
-"accelerate>=0.20.3,!=0.34,<1.7",
-"transformers>=4.45,<4.52",
-"torch>=2.2.0,<2.6", 
-"triton>=3.0,<3.4",
+"accelerate>=0.20.3,!=0.34,<1.10",
+"transformers>=4.45,<4.54",
+"torch>=2.2.0,<2.8", 
 "tqdm>=4.66.2,<5.0",
-"datasets>=3.0.0,<4.0",
-"ninja>=1.11.1.1,<2.0",
-"tensorboard",
-"notebook",
-"torchvision>=0.17",
-"evaluate",
-"huggingface_hub",
+"datasets>=3.0.0,<5.0",
 "pandas",
 "safetensors",
-"ibm-fms>=0.0.8",
 "pkginfo>1.10"
 ]
 
 [project.optional-dependencies]
-dev = ["pre-commit>=3.0.4,<5.0"]
-fp8 = ["llmcompressor"]
-gptq = ["auto_gptq>0.4.2", "optimum>=1.15.0"]
-visualize = ["matplotlib", "graphviz", "pygraphviz"]
+examples = ["ninja>=1.11.1.1,<2.0", "evaluate", "huggingface_hub"]
+fp8 = ["llmcompressor", "torchao"]
+gptq = ["Cython", "gptqmodel>=1.7.3"]
+mx = ["microxcaling>=1.1"]
+opt = ["fms-model-optimizer[fp8, gptq, mx]"]
+aiu = ["ibm-fms>=0.0.8"]
+torchvision = ["torchvision>=0.17"]
 flash-attn = ["flash-attn>=2.5.3,<3.0"]
-opt = ["fms-model-optimizer[fp8, gptq]"]
+triton = ["triton>=3.0,<3.4"]
+visualize = ["matplotlib", "graphviz", "pygraphviz", "tensorboard", "notebook"]
+dev = ["pre-commit>=3.0.4,<5.0"]
+test = ["pytest", "pillow"]
 
 [project.urls]
 homepage = "https://github.com/foundation-model-stack/fms-model-optimizer"
@@ -55,9 +53,15 @@ source = "https://github.com/foundation-model-stack/fms-model-optimizer"
 issues = "https://github.com/foundation-model-stack/fms-model-optimizer/issues"
 
 [tool.setuptools_scm]
+# Version files are optional, this just marginally speeds up version inspection
+# at runtime
 version_file = "fms_mo/_version.py"
-# do not include +gREV local version, required for Test PyPI upload
+# Do not include +gREV local version, required for Test PyPI upload
+# Version strings are formatted as `{version}+{local}`, e.g. "0.1.dev1+gb1a7032"
+# Local versioning is incompatible with pypi, so we disable it by default.
 local_scheme = "no-local-version"
+# For more version configuration, see 
+# https://setuptools-scm.readthedocs.io/en/latest/config/
 
 [tool.setuptools.packages.find]
 where = [""]

@@ -237,6 +237,7 @@ def prepare_input(
     if isinstance(data, torch.Tensor):
         kwargs = {"device": device}
         return data.to(**kwargs)
+
     logger.warning(
         "data input to prepare_input must be Dict, "
         "Tuple, List or torch.Tensor and currently is",

@@ -2,7 +2,7 @@
     "decoder_arch": true,
     "align_zero": true,
     "qgroup": null,
-    "act_scale_path": null,
+    "smoothq_act_scale_path": null,
     "qmodel_calibration_new": 10,
     "qskip_large_mag_layers": true,
     "ptq_nbatch": 128,

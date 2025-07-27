@@ -18,6 +18,19 @@ from typing import Any, Mapping, Optional
 import math
 
 # Third Party
+import torch
+
+# Local
+from fms_mo.utils.import_utils import available_packages
+
+if not available_packages["fms"]:
+    raise ImportError(
+        "AIU functionality requires ibm-fms to be installed."
+        "See https://github.com/foundation-model-stack/foundation-model-stack for details."
+    )
+
+# Third Party
+# pylint: disable=import-error,wrong-import-position,ungrouped-imports
 from fms.modules.linear import (
     LinearModuleShardingInfo,
     LinearParameterShardingInfo,
@@ -27,7 +40,6 @@ from fms.modules.linear import (
 )
 from fms.modules.tp import ShardType, TPModule
 from fms.utils.gptq import GPTQLinearConfig
-import torch
 
 # Local
 from fms_mo.aiu_addons.gptq.gptq_aiu_op import register_aiu_gptq_op

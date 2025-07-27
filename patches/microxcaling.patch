@@ -1,0 +1,17 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index e80053e..b4ec100 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -5,9 +5,9 @@ description = 'The Microsoft MX floating point library'
+ readme = "README.md"
+ requires-python = ">=3.8"
+ dependencies = [
+-    "torch==2.2.0",
+-    "torchvision==0.16",
+-    "torchaudio==2.1.0"
++    "torch",
++    "torchvision",
++    "torchaudio"
+ ]
+ license = { file = "LICENSE" }
+ keywords = ["mx", "floating point", "math", "mathematics", "machine learning", "deep learning", "artificial intelligence", "ai", "ml", "dl", "torch", "torchvision", "torchaudio"]

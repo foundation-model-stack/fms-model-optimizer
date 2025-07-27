@@ -30,7 +30,6 @@ import random
 import sys
 
 # Third Party
-from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 import numpy as np
 import pandas as pd
@@ -43,6 +42,7 @@ import torch.nn.functional as F
 # Local
 from fms_mo.modules import QBmm, QLinear
 from fms_mo.modules.conv import QConv2dPTQv2
+from fms_mo.modules.linear import LinearFPxAcc, QLinearINT8Deploy
 from fms_mo.quant.quantizers import (
     AdaRoundQuantizer,
     Qdynamic,
@@ -419,15 +419,25 @@ class PTQHookRecInOutLMv2(nn.Module):
     leave the special handling, e.g. reshape/cat/shuffling...etc, for later
     """
 
-    def __init__(self, qcfg, name=None, cls2rec=(nn.Conv2d,), recInOnly=False):
+    def __init__(
+        self,
+        qcfg,
+        name=None,
+        cls2rec=(nn.Conv2d, nn.Linear),
+        recInOnly=False,
+        stop_after_rec=False,
+        cache_dev="cuda",
+    ):
         super().__init__()
         self.name = name
         self.qcfg = qcfg
         self.cls2rec = cls2rec
         self.rec_input_only = recInOnly
         self.num_valid_input = -1
+        self.stop_after_rec = stop_after_rec
+        self.cache_dev = cache_dev
 
-    def __call__(self, mod, inputs, output):
+    def __call__(self, mod, inputs, *args, **_kwargs):
         # make sure this module/block's ptqmode is not 'q_out'
         submods = [m for m in mod.modules() if isinstance(m, self.cls2rec)]
         if any(sm.ptqmode == "q_out" for sm in submods):
@@ -448,7 +458,7 @@ class PTQHookRecInOutLMv2(nn.Module):
         # check available GPU memory, cache on GPU if possible:
         GPUmem_available, _GPUmem_total = torch.cuda.mem_get_info()
         # 1 block for SQUAD/BERT 500 batches*12/batch = ~10G
-        if GPUmem_available / 1e9 > 20:
+        if self.cache_dev == "cuda" and GPUmem_available / 1e9 > 20:
             cache_device = "cuda"
         else:
             cache_device = "cpu"
@@ -461,17 +471,129 @@ class PTQHookRecInOutLMv2(nn.Module):
         )
 
         # output could be a tuple of a single tensor or simply a tensor ?
-        assert isinstance(output, (torch.Tensor, tuple))
-        if not self.rec_input_only:
+        if not self.rec_input_only and "output" in args:
+            output = args["output"]
+            assert isinstance(output, (torch.Tensor, tuple))
             self.qcfg["cached_output"].append(
                 output[0].detach().to(cache_device)
                 if isinstance(output, tuple)
                 else output.detach().to(cache_device)
             )
+        assert not self.stop_after_rec
 
 
-# this hook is meant for ptq_loss_func == 'fisher_diag' and to temp hold the "Q_out" of the module
+class HookRecPostQuantInOut(torch.nn.Module):
+    """Another simplified hook to check post-quantized input/output, e.g. within +-127 for INT8."""
+
+    def __init__(self, cache_dict={}, mod_name=None):
+        super().__init__()
+        self.cache_dict = cache_dict
+        self.mod_name = mod_name
+        name_split = mod_name.split(".")
+        self.lay_idx = int(name_split[3])
+        self.lay_key = name_split[6]
+
+        self.cache_dev = "cpu"
+        # prepare empty dict for later use
+        self.cache_dict[mod_name] = {}
+        self.fwd_mapping = {
+            LinearFPxAcc: self.call_func_for_fpxacc,
+            QLinear: self.call_func_for_qlinear,
+            QLinearINT8Deploy: self.call_func_for_qlinear_int,
+            torch.nn.Linear: self.call_func_for_nnlinear,
+        }
+
+    def call_func_for_fpxacc(self, mod, inputs, outputs, **_kwargs):
+        raise NotImplementedError
+
+    def call_func_for_qlinear(self, mod, inputs, outputs, **_kwargs):
+        lay_idx = self.lay_idx
+        lay_key = self.lay_key
+        mod_name = self.mod_name
+        cache_dict = self.cache_dict
+
+        act_max = inputs[0].abs().amax(dim=[d for d in range(len(inputs[0].shape) - 1)])
+        # mod.smoothq_act_scale
+        w_max = mod.weight.abs().max(dim=0, keepdim=True)[0].clamp(min=1e-5)
+        is_smq_layer = not torch.all(act_max == 0).item()
+        # smoothQ scale = smoothq_act_scale**alpha / weight_scale**(1.0 - alpha)
+        # smoothq_scale = mod.get_smoothq_scale(inputs[0])
+        smoothq_scale = getattr(mod, "smq_scale", 1.0)
+        # "smq_scale" only available in QLin_INT8
+
+        with torch.no_grad():
+            smoothed_inp = inputs[0] / smoothq_scale
+            smoothed_w = mod.weight * smoothq_scale
+
+            # this is assuming pertokenmax quantizer, NOTE calc quant scale after smoothing
+            absmax = smoothed_inp.abs().max(dim=-1, keepdim=True)[0]
+            qa_scale = absmax.clamp(min=1e-5) / 127
+            qinput = torch.round(smoothed_inp / qa_scale).clamp(-127, 127)
+            # should clamp to -128?
+            if mod.qa_mode == "pertokenmax":
+                # doesnt implement dequant=False yet, do it manually
+                cva = mod.quantize_feature.clip_val
+                qa_scale = cva.clamp(min=1e-5).div(127)
+                qinput = smoothed_inp.div(qa_scale).round()
+            else:
+                mod.quantize_feature.dequantize = False
+                qinput = mod.quantize_feature(smoothed_inp)
+                mod.quantize_feature.dequantize = True
+
+            # also record quantized, smoothed W in INT8, calc both maxperCh and SAWBperCh
+            cvw = mod.quantize_weight.clip_val
+            scale_w = cvw / 127
+            mod.quantize_weight.dequantize = False
+            qw = mod.quantize_weight(smoothed_w)
+            mod.quantize_weight.dequantize = True
+
+            # inputs is a tuple, QLinear only has 1 valid input
+            cache_dict[mod_name]["input"] = inputs[0].to(self.cache_dev)
+            cache_dict[mod_name]["cva"] = cva.to(self.cache_dev)
+            cache_dict[mod_name]["cvw"] = cvw.to(self.cache_dev)
+            cache_dict[mod_name]["smoothed_input"] = smoothed_inp.to(self.cache_dev)
+            cache_dict[mod_name]["smoothed_weight"] = smoothed_w.to(self.cache_dev)
+            cache_dict[mod_name]["qinput"] = qinput.to(self.cache_dev)
+            # NOTE in INT8, *scales if need dQ
+            cache_dict[mod_name]["qweight"] = qw.to(self.cache_dev)
+            # torch.round(smoothed_w.T/scale_w).clamp(-127, 127).to(self.cache_dev)
+            # cache_dict[mod_name]["qoutput"] = outputs.to(self.cache_dev)
+
+    def call_func_for_qlinear_int(self, mod, inputs, outputs, **_kwargs):
+        smoothq_scale = getattr(mod, "smq_scale", 1.0)
+        mod_name = self.mod_name
+        cache_dict = self.cache_dict
+        with torch.no_grad():
+            if mod.useDynMaxQfunc in [-1, -2]:
+                qinput = mod.qa_dynamic_max_qfunc(inputs[0])
+            elif mod.use_fake_zero_shift:
+                qinput = mod.qa_dyn_max_fake_zero_shift(inputs[0])
+            elif mod.usePTnativeQfunc:
+                qinput = mod.qa_raw_qfunc(inputs[0])
+            else:
+                qinput = mod.qa_fmo_mo_qfunc(inputs[0])
+
+            # inputs is a tuple, QLinear only has 1 valid input
+            cache_dict[mod_name]["input"] = inputs[0].to(self.cache_dev)
+            cache_dict[mod_name]["cva"] = mod.cvs[0].to(self.cache_dev)
+            cache_dict[mod_name]["cvw"] = mod.cvs[2].to(self.cache_dev)
+            cache_dict[mod_name]["qinput"] = qinput.to(self.cache_dev)
+            cache_dict[mod_name]["qweight"] = mod.weight.to(self.cache_dev)
+
+    def call_func_for_nnlinear(self, mod, inputs, outputs, **_kwargs):
+        mod_name = self.mod_name
+        cache_dict = self.cache_dict
+        cache_dict[mod_name]["input"] = inputs[0].to(self.cache_dev)
+        cache_dict[mod_name]["weight"] = mod.weight.to(self.cache_dev)
+
+    def __call__(self, mod, inputs, outputs, **_kwargs):
+        self.fwd_mapping[type(mod)](mod, inputs, outputs, **_kwargs)
+
+
 class PTQHookRecQOut(nn.Module):
+    """This hook is for ptq_loss_func == 'fisher_diag' and will temporarily hold the "Q_out" of the
+    module"""
+
     def __init__(self, qcfg):
         super().__init__()
         self.qcfg = qcfg
@@ -1437,49 +1559,57 @@ def ptq_mod_optim_lm(_model, m, layers, qcfg, optim_mode="both", **kwargs):
                 # show loss on pbar
                 pbar2.set_description(pbar_desc + f"{PTQloss:.6f}")
 
-            if isinstance(qcfg["tb_writer"], SummaryWriter) and isOutput:
-                scalars2log = {}
-                hist2log = {}
+            if available_packages["tensorboard"]:
+                # Third Party
+                from torch.utils.tensorboard import SummaryWriter
 
-                for k, v in loss4plot.items():  # plot loss
-                    scalars2log[f"{mod_name}/PTQloss_{k}"] = v
-                for k, v in m.named_buffers():  # plot cv, delta, zp, alpha, and lr
-                    if any(kb in k for kb in ["delta", "zero_point", "clip_val"]):
-                        if len(v.shape) > 0 and v.shape[0] > 1:  # perCh
-                            hist2log[f"{mod_name}/{k}"] = v
-                        else:
-                            scalars2log[f"{mod_name}/{k}"] = v
-                for p, pname in zip(
-                    optim_a.param_groups[0]["params"], param_names[1]
-                ):  # cva
-                    scalars2log[f"{mod_name}/{pname}"] = p.item()
-                    scalars2log[f"{mod_name}/LR_cv_a"] = optim_a.param_groups[0]["lr"]
-                for p, pname in zip(
-                    optim_w.param_groups[0]["params"], param_names[0]
-                ):  # weights
-                    hist2log[f"{mod_name}/{pname}"] = p
-                    scalars2log[f"{mod_name}/LR_w"] = optim_w.param_groups[0]["lr"]
-                for p, pname in zip(
-                    optim_w.param_groups[1]["params"], param_names[2]
-                ):  # cvw
-                    if "alpha" in pname:
-                        hist2log[f"{mod_name}/{pname}"] = p
-                    else:
+                if isinstance(qcfg["tb_writer"], SummaryWriter) and isOutput:
+                    scalars2log = {}
+                    hist2log = {}
+
+                    for k, v in loss4plot.items():  # plot loss
+                        scalars2log[f"{mod_name}/PTQloss_{k}"] = v
+                    for k, v in m.named_buffers():  # plot cv, delta, zp, alpha, and lr
+                        if any(kb in k for kb in ["delta", "zero_point", "clip_val"]):
+                            if len(v.shape) > 0 and v.shape[0] > 1:  # perCh
+                                hist2log[f"{mod_name}/{k}"] = v
+                            else:
+                                scalars2log[f"{mod_name}/{k}"] = v
+                    for p, pname in zip(
+                        optim_a.param_groups[0]["params"], param_names[1]
+                    ):  # cva
                         scalars2log[f"{mod_name}/{pname}"] = p.item()
-                    scalars2log[f"{mod_name}/LR_cvw"] = optim_w.param_groups[1]["lr"]
-                if "adaround" in qcfg["qw_mode"]:
-                    scalars2log[f"{mod_name}/AdaR_beta"] = (
-                        loss_func.temp_decay.curr_beta
-                    )
-                    for lidx, l in enumerate(layers):
-                        if not hasattr(l, "quantize_m1"):
-                            hist2log[f"{mod_name}/W{lidx}"] = l.weight
+                        scalars2log[f"{mod_name}/LR_cv_a"] = optim_a.param_groups[0][
+                            "lr"
+                        ]
+                    for p, pname in zip(
+                        optim_w.param_groups[0]["params"], param_names[0]
+                    ):  # weights
+                        hist2log[f"{mod_name}/{pname}"] = p
+                        scalars2log[f"{mod_name}/LR_w"] = optim_w.param_groups[0]["lr"]
+                    for p, pname in zip(
+                        optim_w.param_groups[1]["params"], param_names[2]
+                    ):  # cvw
+                        if "alpha" in pname:
+                            hist2log[f"{mod_name}/{pname}"] = p
+                        else:
+                            scalars2log[f"{mod_name}/{pname}"] = p.item()
+                        scalars2log[f"{mod_name}/LR_cvw"] = optim_w.param_groups[1][
+                            "lr"
+                        ]
+                    if "adaround" in qcfg["qw_mode"]:
+                        scalars2log[f"{mod_name}/AdaR_beta"] = (
+                            loss_func.temp_decay.curr_beta
+                        )
+                        for lidx, l in enumerate(layers):
+                            if not hasattr(l, "quantize_m1"):
+                                hist2log[f"{mod_name}/W{lidx}"] = l.weight
 
-                # write every in one shot will mess up the folder, better write them one by one
-                for n, v in scalars2log.items():
-                    qcfg["tb_writer"].add_scalar(n, v, Niter)
-                for n, v in hist2log.items():
-                    qcfg["tb_writer"].add_histogram(n, v, Niter)
+                    # write every in one shot will mess up the folder, better write them one by one
+                    for n, v in scalars2log.items():
+                        qcfg["tb_writer"].add_scalar(n, v, Niter)
+                    for n, v in hist2log.items():
+                        qcfg["tb_writer"].add_histogram(n, v, Niter)
 
         for s in scheduler:
             s.step()  # we set up scheduler based on Nouterloop, not inner
@@ -2010,7 +2140,7 @@ def get_blocks(model, model_type=None):
             None,
             "lm_head",
         ),
-        "granite": (
+        "granite_gptbigcode": (
             "transformer.h",
             "transformer.wte",
             "transformer.wpe",
@@ -2018,10 +2148,18 @@ def get_blocks(model, model_type=None):
             "transformer.ln_f",
             "lm_head",
         ),
+        "granite": (
+            "model.layers",
+            "model.embed_tokens",
+            "model.rotary_emb",
+            None,
+            "model.norm",
+            "lm_head",
+        ),
         "llama": (
             "model.layers",
             "model.embed_tokens",
-            None,
+            "model.rotary_emb",
             None,
             "model.norm",
             "lm_head",
@@ -2111,7 +2249,9 @@ def cache_block0_inputs(
     model, dloader, qcfg, blocks, emb=None, emb_pos=None, emb_ln=None, dev="cpu"
 ):
     """
-    To cache the input to the first transformer block.
+    To cache the input to the first transformer block. Basically a "forward_pre_hook"
+    NOTE, change caching from tensor to list to allow varying input length, slightly
+    increase memeory due to mask and alibi.
     """
     emb = emb.to(dev)
     if emb_pos is not None:
@@ -2119,12 +2259,6 @@ def cache_block0_inputs(
     if emb_ln is not None:
         emb_ln = emb_ln.to(dev)
     blocks[0] = blocks[0].to(dev)
-    # NOTE, change caching from tensor to list to allow varying input length, slightly
-    # increase memeory due to mask and alibi.
-    qcfg["cached_block0_input"] = []
-    qcfg["cache_id"] = 0
-    qcfg["cached_mask"] = []
-    qcfg["cached_alibi"] = []
     # move block0 to GPU and excuting fwd() until finish block0
     if "fms" in qcfg["model_type"]:
         qcfg["kw_to_cache"] = {
@@ -2142,9 +2276,16 @@ def cache_block0_inputs(
         }
         blocks[0] = RunModule(blocks[0], qcfg)
 
+    # clear up old cache, if exists.
+    qcfg["cached_block0_input"] = []
+    qcfg["cache_id"] = 0
+    for kw in qcfg["kw_to_cache"].values():
+        if kw in qcfg:
+            qcfg[kw] = []
+
     if isinstance(dloader, torch.utils.data.DataLoader):
         pbar = tqdm(
-            dloader, desc="Phase 0: PTQ caching block0 input", total=qcfg["ptq_nbatch"]
+            dloader, desc="Phase 0: Caching block0 inputs", total=qcfg["ptq_nbatch"]
         )
         for data_mb, _ in zip(pbar, range(qcfg["ptq_nbatch"])):
             try:
@@ -2310,9 +2451,8 @@ def freeze_layers(m, layer_list):
 
 @torch.no_grad()
 def calibration_llm_1GPU(qcfg, model, dloader):
-    """
-    calibration for large models that can not fit the whole model on 1 GPU.
-    """
+    """Calibration for large models that can not fit on 1 GPU."""
+
     model.train()
     dev = "cuda"
     qcfg["batch_size"] = 1
@@ -2358,6 +2498,83 @@ def calibration_llm_1GPU(qcfg, model, dloader):
 
             with torch.no_grad(), patch_torch_bmm(qcfg):
                 qcfg["cached_input"][i] = m(cached_inp_prev_lay, **data_mb)[0].cpu()
+
+        m.cpu()
+        torch.cuda.empty_cache()
+
+    logger.info("All blocks are calibrated")
+
+
+@torch.no_grad()
+def calibration_llm_1GPU_v2(qcfg, model, dloader):
+    """
+    Improved version of Calibration for large language models that can not fit on 1 GPU with new
+    (built-in) calibration mechanism.
+    NOTE:
+    1. Calibration only, NO update to weights!
+    2. Rely on a alternative "pre fwd hook" to cache all possible inputs.
+    3. As calibration usually cache a small number of data only, no need to move each batch back and
+        forth between GPU and CPU.
+    """
+
+    model.train()
+    dev = "cuda"
+    qcfg["batch_size"] = 1
+    qcfg["dtype"] = next(iter(model.parameters())).dtype
+    qcfg["n_samples"] = min(qcfg["ptq_nbatch"], qcfg["qmodel_calibration_new"])
+
+    assert "model_type" in qcfg, "Unknown model type. please check before proceed."
+    assert isinstance(
+        dloader, torch.utils.data.DataLoader
+    ), "Please provide a valid dataloader."
+    # --- Phase 0 cache the inputs of the block0---
+    model.config.use_cache = False
+    blocks, emb, emb_pos, emb_ln, _, _ = get_blocks(model, qcfg["model_type"])
+
+    cache_block0_inputs(
+        model,
+        dloader,
+        qcfg,
+        blocks,
+        emb=emb,
+        emb_pos=emb_pos,
+        emb_ln=emb_ln,
+        dev="cpu",
+    )
+    logger.info("Done, caching inputs to block0 for calibration")
+
+    # --- Phase 1 --- compute blocks and last linear layer
+    pbar = tqdm(
+        blocks, desc="Phase 1: Calibration for each block", position=0, leave=True
+    )
+    qcfg["cached_input"] = [
+        inp.clone().detach().to(dev) for inp in qcfg["cached_block0_input"]
+    ]
+    kw_to_use = {
+        kw_org: kw_new
+        for kw_org, kw_new in qcfg["kw_to_cache"].items()
+        if len(qcfg[kw_new]) == len(qcfg["cached_input"])
+    }
+    for _num_block, m in enumerate(pbar):
+        m.to(dev)
+        for i in tqdm(
+            range(qcfg["n_samples"]), desc="number of samples", position=1, leave=False
+        ):
+            if qcfg["cached_alibi"]:
+                cached_inp_prev_lay = qcfg["cached_input"][i].unsqueeze(0).to(dev)
+                data_mb = {
+                    "attention_mask": qcfg["cached_mask"][i].unsqueeze(0).to(dev),
+                    "alibi": qcfg["cached_alibi"][i].unsqueeze(0).to(dev),
+                }
+            else:
+                cached_inp_prev_lay = qcfg["cached_input"][i]
+                data_mb = {
+                    kw_org: move_to(qcfg[kw_new][i], dev)
+                    for kw_org, kw_new in kw_to_use.items()
+                }
+
+            with patch_torch_bmm(qcfg):
+                qcfg["cached_input"][i] = m(cached_inp_prev_lay, **data_mb)[0]
 
         m.cpu()
         torch.cuda.empty_cache()
@@ -2498,8 +2715,8 @@ def get_act_scales_1gpu(model, dloader, qcfg):
 
     assert "model_type" in qcfg, "Unknown model type. please check before proceed."
     assert (
-        qcfg["loader_len"] == qcfg["ptq_nbatch"]
-    ), "set batch_size=1 and PTQ samples== Nbatches"
+        qcfg["loader_len"] >= qcfg["ptq_nbatch"]
+    ), "Please make sure dataloader has enough data needed for PTQ (ie. check qcfg['ptq_nbatch'])."
     # --- Phase 0 cache the inputs of the block0---
     blocks, emb, emb_pos, emb_ln, _, _ = get_blocks(model, qcfg["model_type"])
     cache_block0_inputs(
@@ -2537,7 +2754,7 @@ def dq_llm(model, scale, qcfg):
 
     for name, module in model.named_modules():
         if isinstance(module, (QLinear,)):
-            if any(x in name for x in qcfg["scale_layers"]):
+            if any(x in name for x in qcfg["smoothq_scale_layers"]):
                 module.set_act_scale(scale[name])
                 logger.info(
                     f"Apply layer {name} with activation scales (10)"

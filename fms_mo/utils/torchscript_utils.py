@@ -28,7 +28,6 @@ from transformers.tokenization_utils_base import BatchEncoding
 import torch
 
 # Local
-from fms_mo.modules import QBmm
 from fms_mo.quant.quantizers import transformers_prepare_input
 from fms_mo.utils.import_utils import available_packages
 from fms_mo.utils.utils import move_to, patch_torch_bmm, prepare_data_4_fwd
@@ -1543,6 +1542,7 @@ def model_analyzer_ts(
         # ['QBmm'] is determined by nbits_bmm[1,2], if using QBertSelfAttn instead of func swapping,
         #  it could still be True
         # ['which2patch'] == 'off' will forcefully turn off this searching and QBmm attaching
+        QBmm = quant_config["mapping"]["matmul_or_bmm"]
 
         find_single_sided_bmm(reconstructed_graph)
         # After search, flag "isActOutUnidir" and "isActOutBounded" will be available
