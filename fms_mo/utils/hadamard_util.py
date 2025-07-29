@@ -52,6 +52,7 @@ class HadamardTransform(torch.autograd.Function):
 
 def get_hadK(n, transpose=False):
     """Simplify the implementation and use binary tensors instead of text implementation."""
+    hadK = None
     for K in [172, 156, 140, 108, 60, 52, 44, 40, 36, 28, 20, 12]:
         if n % K == 0 and is_pow2(n // K):
             hadK = hadKs[str(K)]
