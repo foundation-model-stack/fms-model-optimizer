@@ -12,32 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Util function transformers_prepare_input() is borrowed from huggingface transformers/trainer.py
-Trainer class method _prepare_input().
-see https://github.com/huggingface/transformers/blob/v4.46.3/src/transformers/trainer.py#L3497
-
-Class/function MSEObserver, ObserverBase, fake_quantize_per_channel_affine,
-fake_quantize_per_tensor_affine, _transform_to_ch_axis, CyclicTempDecay, LinearTempDecay,
-AdaRoundSTE, AdaRoundQuantizerare are modified from BRECQ's repo: https://github.com/yhhhli/BRECQ
-
+"""
+Module containing all quantizers and STEs
 """
 
-# pylint: disable=too-many-return-statements
+# pylint: skip-file
 
 # Standard
 from collections.abc import Mapping
-from typing import Any, Union
+from typing import Any, List, Union
 import logging
 import math
 import os
 import random
+import sys
 
 # Third Party
 from packaging.version import Version
 import numpy as np
 import torch
 import torch.fx
-import torch.nn as nn  # pylint: disable=consider-using-from-import
+import torch.nn as nn
 import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
@@ -108,8 +103,8 @@ def get_activation_quantizer(
         elif qa_mode == "lsq+":
             act_quantizer = LSQPlus(
                 nbits,
-                init_clip_vals=clip_val,
-                init_clip_valb=clip_valn,
+                clip_val=clip_val,
+                clip_valn=clip_valn,
                 dequantize=True,
                 inplace=False,
             )
@@ -123,27 +118,22 @@ def get_activation_quantizer(
             )
         elif qa_mode == "dorefa":
             act_quantizer = dorefa_quantize_activation
-
-        elif "max" in qa_mode:
-            # NOTE Need to be careful using this for activation, particular to 1 sided.
-            if "min" in qa_mode:
-                act_quantizer = Qmax(nbits, align_zero=align_zero, minmax=True)
-            elif "pertoken" in qa_mode or "perToken" in qa_mode:
-                act_quantizer = QMaxDynamic(nbits, dim=-1)
-            elif "per_channel" in qa_mode or "perCh" in qa_mode:
-                act_quantizer = QMaxDynamic(nbits, dim=-2)
-            elif "sym" in qa_mode:
-                act_quantizer = Qmax(
-                    nbits,
-                    align_zero=True,
-                    minmax=False,
-                    extend_act_range=extend_act_range,
-                )
-            else:
-                act_quantizer = Qmax(nbits, align_zero=align_zero, minmax=False)
+        elif (
+            qa_mode == "max"
+        ):  # NOTE Need to be careful using this for activation, particular to 1 sided.
+            act_quantizer = Qmax(nbits, align_zero=align_zero, minmax=False)
+        elif qa_mode == "minmax":
+            act_quantizer = Qmax(nbits, align_zero=align_zero, minmax=True)
         elif qa_mode == "fix":
             act_quantizer = QFixSymmetric(
                 nbits, init_clip_val=clip_val, align_zero=align_zero
+            )
+        elif qa_mode == "maxsym":
+            act_quantizer = Qmax(
+                nbits,
+                align_zero=True,
+                minmax=False,
+                extend_act_range=extend_act_range,
             )
         elif qa_mode == "pactsym":
             act_quantizer = PACT2Sym(
@@ -184,10 +174,12 @@ def get_activation_quantizer(
                     perToken=perToken,
                     emulate=True,
                 )
+        elif qa_mode == "pertokenmax":
+            act_quantizer = PerTokenMax(nbits)
         else:
             raise ValueError(f"unrecognized activation quantization mode {qa_mode}")
     else:  # swcap-compatible activation quantizers
-        if qa_mode in ("pact", "pact+"):
+        if qa_mode == "pact" or qa_mode == "pact+":
             if non_neg:
                 assert qa_mode == "pact", "pact+ not yet supported on single side PACT"
                 act_quantizer = PACT_sw(
@@ -249,12 +241,12 @@ def get_weight_quantizer(
     - sawb/sawb+
     - max
     """
-    weight_quantizer = None
+
     if not use_swcap:
         cggrad = "cgpact" in qw_mode
 
         if "sawb" in qw_mode:
-            Nch = w_shape[0] if w_shape is not None and "perCh" in qw_mode else False
+            Nch = w_shape[0] if w_shape != None and "perCh" in qw_mode else False
             clipSTE = "+" in qw_mode
             intp = "interp" in qw_mode
             weight_quantizer = SAWB(
@@ -267,7 +259,7 @@ def get_weight_quantizer(
                 interp=intp,
             )
         elif "max" in qw_mode:
-            Nch = w_shape[0] if w_shape is not None and "perCh" in qw_mode else False
+            Nch = w_shape[0] if w_shape != None and "perCh" in qw_mode else False
             Ngp = (
                 [w_shape[0] * w_shape[1] // perGp, perGp]
                 if "perGp" in qw_mode
@@ -291,7 +283,6 @@ def get_weight_quantizer(
             )
         elif qw_mode == "cgpact":
             ...
-            # TODO check implementation
         elif qw_mode == "pact+":
             weight_quantizer = PACTplusSym(
                 nbits,
@@ -304,8 +295,8 @@ def get_weight_quantizer(
         elif qw_mode == "lsq+":
             weight_quantizer = LSQPlus(
                 nbits,
-                init_clip_vals=clip_val,
-                init_clip_valb=clip_valn,
+                clip_val=clip_val,
+                clip_valn=clip_valn,
                 dequantize=True,
                 inplace=False,
             )
@@ -336,13 +327,11 @@ def get_weight_quantizer(
                     scale_to_max="scale" in qw_mode,
                 )
             else:
-                # qw_mode should be one of:
+                # qw_mode should be one of
                 # [fp8_e4m3_sat, fp8_e5m2_sat, fp8_e4m3_scale, fp8_e5m2_scale] + 'perCh'
                 # by default, emulate = True, unless using a GPU that support FP8 computation
                 # NOTE: emulate will be similar to dequantize.
-                Nch = (
-                    w_shape[0] if w_shape is not None and "perCh" in qw_mode else False
-                )
+                Nch = w_shape[0] if w_shape != None and "perCh" in qw_mode else False
                 weight_quantizer = to_fp8(
                     nbits,
                     q_mode=qw_mode,
@@ -392,11 +381,11 @@ class SAWB(nn.Module):
         perCh=False,
         interp=False,
     ):
-        super().__init__()
+        super(SAWB, self).__init__()
         if num_bits in [2, 4, 8]:
             self.num_bits = num_bits
         else:
-            raise ValueError("FMS: SAWB supports 2, 4, and 8-bit quantization only.")
+            raise ValueError("SAWB supports 2, 4, and 8-bit quantization only.")
         self.dequantize = dequantize
         self.inplace = inplace
         self.align_zero = align_zero
@@ -406,12 +395,12 @@ class SAWB(nn.Module):
 
         self.set_quantizer()
 
-        # self.register_buffer(
-        #     "sawb_clip", torch.zeros(perCh) if perCh else torch.Tensor([0.0])
-        # )  # will obsolete soon
+        self.register_buffer(
+            "sawb_clip", torch.zeros(perCh) if perCh else torch.Tensor([0.0])
+        )  # will obsolete soon
         self.register_buffer(
             "clip_val", torch.zeros(perCh) if perCh else torch.Tensor([0.0])
-        )  # make it consistent with other quantizers
+        )
 
     def set_quantizer(self):
         if self.clipSTE:
@@ -424,25 +413,23 @@ class SAWB(nn.Module):
             else:
                 self.quantizer = SAWBPlusSTE
         else:
-            # if perCh but no sawb+ (e.g. `sawb_perCh`) will use a per-tensor clip
-            # copied over each channel
+            # if perCh but no sawb+, use a per-tensor clip copied to each channel
             if self.align_zero:
                 self.quantizer = SAWBZeroSTE
             else:
                 self.quantizer = SAWBSTE
 
-    def forward(self, input_tensor: torch.Tensor) -> torch.Tensor:
-        input_tensor = self.quantizer.apply(
-            input_tensor,
+    def forward(self, input):
+        input = self.quantizer.apply(
+            input,
             self.num_bits,
             self.dequantize,
             self.inplace,
             self.clip_val,
-            self.training,
         )
         # NOTE: in the past, SAWB didn't check eval/training and recalc clipvals no matter what,
         #       now we should pass self.training to avoid confusion
-        return input_tensor
+        return input
 
     def __repr__(self):
         inplace_str = ", inplace" if self.inplace else ""
@@ -460,84 +447,99 @@ class SAWBPlusZeroSTE(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(
-        ctx, input_tensor, num_bits, dequantize, inplace, objSAWB_clip_val, istraining
-    ):
+    def forward(ctx, input, num_bits, dequantize, inplace, objSAWB_clip_val):
         if inplace:
-            ctx.mark_dirty(input_tensor)
-        scale = 2**num_bits - 2
-        zero_point = 0.0
-        if istraining:
-            bits2code = {2: 103, 4: 403, 7: 703, 8: 803}
-            if num_bits in bits2code:
-                clip_val, _ = sawb_params_code(
-                    num_bits, bits2code[num_bits], input_tensor
-                )
-            else:
-                clip_val = input_tensor.abs().max()
-        else:
-            # do not recalc clipval when under eval mode
-            clip_val = objSAWB_clip_val
-
-        # Sometimes sawb returns negative clipvals, add a safety check
-        if clip_val <= 0:
-            clip_val = input_tensor.abs().max()
+            ctx.mark_dirty(input)
+        zero_point = torch.tensor(0)
+        n_levels = 2**num_bits - 2
+        bits2code = {2: 103, 4: 403, 8: 803}  # 7: 703,
+        num_bits_int = (
+            num_bits.item() if isinstance(num_bits, torch.Tensor) else num_bits
+        )
+        clip_val, _ = sawb_params_code(num_bits, bits2code[num_bits_int], input)
+        scale = 1.0 / n_levels
 
         if len(clip_val.shape) == 0:
             clip_val = clip_val.unsqueeze(dim=0)
-        objSAWB_clip_val.copy_(clip_val)
-        output = input_tensor.mul(1 / clip_val).clamp(-1, 1).mul(0.5).add(0.5)
+        objSAWB_clip_val.copy_(clip_val)  # = clip_val.clone().detach()
+
+        output = input.mul(1 / clip_val).clamp(-1, 1).mul(0.5).add(0.5)
         output = linear_quantize(output, scale, zero_point, inplace)
         if dequantize:
             output = linear_dequantize(output, scale, zero_point, inplace)
             output = (2 * output - 1) * clip_val
         else:
-            output -= scale / 2
+            # Transform [0,n_levels] -> [-2**(b-1),2**(b-1)]
+            output = (output - n_levels / 2).to(torch.int8)
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
-        return grad_output, None, None, None, None, None
+        return grad_output, None, None, None, None
+
+
+class SAWBPlus16ZeroSTE(torch.autograd.Function):
+    """SAWB with zero alignment but use 16 bins instead of 15, i.e. asymmetric and 4 bit only"""
+
+    @staticmethod
+    def forward(ctx, input, num_bits, dequantize, inplace, objSAWB_clip_val):
+        assert num_bits == 4, "only implemented for 4bit"
+        #        assert objSAWB.use16bins, "use16bins flag is False, please double check."
+        if inplace:
+            ctx.mark_dirty(input)
+        num_bits_int = (
+            num_bits.item() if isinstance(num_bits, torch.Tensor) else num_bits
+        )
+        clip_val, _ = sawb_params_code(num_bits_int, 403, input)
+        nspace = 2**num_bits - 1
+        scale = clip_val * (8.0 / 7.0 + 1.0) / nspace
+        zero_point = torch.tensor(0)
+        # if objSAWB.use16bins==True else objSAWB.use16bins # can assign 7,8,9... as 0
+        # if wanted, otherwise -7 to +8 by default
+
+        if len(clip_val.shape) == 0:
+            clip_val = clip_val.unsqueeze(dim=0)
+        objSAWB_clip_val.copy_(clip_val)  # = clip_val.clone().detach()
+
+        # [-clip_val, clip_val] scaled, rounded, clamped to [0,15]
+        # output = (input + torch.round(clip_val/ scale)).clamp(0, nspace)
+        output = linear_quantize(input, scale, zero_point, inplace)
+        output = output.clamp(-8, 7)
+        if dequantize:
+            # output = (output - zero_point) * scale
+            output = linear_dequantize(output, scale, zero_point, inplace)
+        else:
+            output = output.to(torch.int8)
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        grad_input = grad_output.clone()
+        return grad_input, None, None, None, None
 
 
 class SAWBPlusZeroPerChSTE(torch.autograd.Function):
-    """per-channel SAWB with zero alignment, can use 15 bins, i.e. [-7,7]"""
+    """per-channel SAWB with zero alignment, can use 15 or 16 bins, i.e. [-7,7] or [-7,8]"""
 
     @staticmethod
-    def forward(
-        ctx, input_tensor, num_bits, dequantize, inplace, objSAWB_clip_val, istraining
-    ):
+    def forward(ctx, input, num_bits, dequantize, inplace, objSAWB_clip_val):
         # assert num_bits in [4, 8], "only implemented for 4bit and 8bit"
         if inplace:
-            ctx.mark_dirty(input_tensor)
+            ctx.mark_dirty(input)
 
-        if istraining:
-            # only recalc clipvals under training mode
-            num_bits_int = (
-                num_bits.item() if isinstance(num_bits, torch.Tensor) else num_bits
-            )
-            SAWBcode_mapping = {8: 803, 4: 403, 2: 103}
-            if num_bits in [2, 4, 8]:
-                sawb_code = SAWBcode_mapping[num_bits_int]
-                clip_val, _ = sawb_params_code(
-                    num_bits, sawb_code, input_tensor, perCh=True
-                )
-            else:
-                # use min/max for 8bit sawb for now.
-                clip_val = torch.max(
-                    input_tensor.abs().reshape([input_tensor.shape[0], -1]), dim=1
-                ).values
-                assert (
-                    len(clip_val) == input_tensor.shape[0]
-                ), f"dimension error, input_tensor{input_tensor.shape}, clipval{clip_val.shape}"
-        else:
-            # do not recalc clipval when under eval mode
-            clip_val = objSAWB_clip_val
+        SAWBcode_mapping = {8: 803, 4: 403, 2: 103}
+        num_bits_int = (
+            num_bits.item() if isinstance(num_bits, torch.Tensor) else num_bits
+        )
+        clip_val, _ = sawb_params_code(
+            num_bits_int, SAWBcode_mapping[num_bits_int], input, perCh=True
+        )
 
         objSAWB_clip_val.copy_(clip_val)
 
+        nspace = 2**num_bits - 2  # + objSAWB.use16bins # ignore 16bins for now
         int_l = -(2 ** (num_bits - 1)) + 1
-        int_u = -int_l
+        int_u = -int_l  # + objSAWB.use16bins # ignore 16bins for now
 
         scale = clip_val * 2 / (2**num_bits - 2)
         # original SAWB assumes odd number of bins when calc clip_val
@@ -545,7 +547,7 @@ class SAWBPlusZeroPerChSTE(torch.autograd.Function):
 
         if dequantize:
             output = torch.fake_quantize_per_channel_affine(
-                input_tensor.float(),
+                input.float(),
                 scale.float(),
                 zero_point.float(),
                 axis=0,
@@ -556,9 +558,7 @@ class SAWBPlusZeroPerChSTE(torch.autograd.Function):
             )  # NOTE return will be a fp32 tensor; function only support float()
         else:
             output = (
-                torch.quantize_per_channel(
-                    input_tensor, scale, zero_point, 0, torch.qint8
-                )
+                torch.quantize_per_channel(input, scale, zero_point, 0, torch.qint8)
                 .int_repr()
                 .clamp(int_l, int_u)
             )
@@ -568,66 +568,55 @@ class SAWBPlusZeroPerChSTE(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        grad_input_tensor = grad_output.clone()
-        return grad_input_tensor, None, None, None, None, None
+        grad_input = grad_output.clone()
+        return grad_input, None, None, None, None
 
 
 class SAWBZeroSTE(torch.autograd.Function):
     """SAWB with zero alignment (symmetric) and gradient clipping
-    Supported bits: 2, 4, 7, 8
+    Supported bits: 2, 4, 8
     Other bits requests: runs x.abs().max(), not SAWB
     "dequantize=False" option is functional
     """
 
     @staticmethod
-    def forward(
-        ctx, input_tensor, num_bits, dequantize, inplace, objSAWB_clip_val, istraining
-    ):
+    def forward(ctx, input, num_bits, dequantize, inplace, objSAWB_clip_val):
         if inplace:
-            ctx.mark_dirty(input_tensor)
-        scale = 2**num_bits - 2
-        zero_point = 0.0
-
-        if istraining:
-            bits2code = {2: 103, 4: 403, 7: 703, 8: 803}
-            if num_bits in bits2code:
-                clip_val, _ = sawb_params_code(
-                    num_bits, bits2code[num_bits], input_tensor
-                )
-            else:
-                clip_val = input_tensor.abs().max()
-        else:
-            # do not recalc clipval when under eval mode
-            clip_val = objSAWB_clip_val
+            ctx.mark_dirty(input)
+        n_levels = 2**num_bits - 2
+        zero_point = torch.tensor(0)
+        bits2code = {2: 103, 4: 403, 8: 803}  # 7: 703,
+        num_bits_int = (
+            num_bits.item() if isinstance(num_bits, torch.Tensor) else num_bits
+        )
+        clip_val, _ = sawb_params_code(num_bits, bits2code[num_bits_int], input)
+        scale = 1.0 / n_levels
 
         if len(clip_val.shape) == 0:
             clip_val = clip_val.unsqueeze(dim=0)
         objSAWB_clip_val.copy_(clip_val)
-        output = input_tensor.mul(1 / clip_val).clamp(-1, 1).mul(0.5).add(0.5)
+        output = input.mul(1 / clip_val).clamp(-1, 1).mul(0.5).add(0.5)
         output = linear_quantize(output, scale, zero_point, inplace)
         if dequantize:
             output = linear_dequantize(output, scale, zero_point, inplace)
             output = (2 * output - 1) * clip_val
         else:
-            output -= scale / 2
-        ctx.save_for_backward(input_tensor, clip_val)
+            # Transform [0,n_levels] -> [-2**(b-1),2**(b-1)]
+            output = (output - n_levels / 2).to(torch.int8)
+        ctx.save_for_backward(input, clip_val)
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
-        input_tensor, clip_val = ctx.saved_tensors
-        grad_input_tensor = grad_output.clone()
-        grad_input_tensor = torch.where(
-            input_tensor < -clip_val,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        input, clip_val = ctx.saved_tensors
+        grad_input = grad_output.clone()
+        grad_input = torch.where(
+            input < -clip_val, torch.zeros_like(grad_input), grad_input
         )
-        grad_input_tensor = torch.where(
-            input_tensor > clip_val,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        grad_input = torch.where(
+            input > clip_val, torch.zeros_like(grad_input), grad_input
         )
-        return grad_input_tensor, None, None, None, None, None
+        return grad_input, None, None, None, None
 
 
 def sawb_params_code(num_bits, code, out, perCh=False):
@@ -652,14 +641,25 @@ def sawb_params_code(num_bits, code, out, perCh=False):
             mu = torch.mean(out.abs(), dim=reduce_dim)
             std = torch.mean(out**2, dim=reduce_dim).sqrt()
             clip_val_vec = coeff[1] * mu + coeff[0] * std
-            return clip_val_vec, None
 
-        # per-tensor
-        x = out.flatten()
-        mu = x.abs().mean()
-        std = x.mul(x).mean().sqrt()
+            # Overwrite negative clip_vals with abs.max
+            neg_clip_idx = clip_val_vec < 0.0
+            if torch.any(neg_clip_idx):
+                clip_val_max = torch.max(out.abs(), dim=1).values
+                clip_val_vec[neg_clip_idx] = clip_val_max[neg_clip_idx]
+
+            return clip_val_vec, None
+        else:
+            # per-tensor
+            x = out.flatten()
+            mu = x.abs().mean()
+            std = x.mul(x).mean().sqrt()
 
         clip_val = coeff[1] * mu + coeff[0] * std
+
+        # Overwrite negative clip_vals with abs.max
+        if clip_val < 0.0:
+            clip_val = x.abs().max()
 
         if code in [102]:
             nspace = 2**num_bits - 1
@@ -678,39 +678,35 @@ class SAWBPlusSTE(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(
-        ctx, input_tensor, num_bits, dequantize, inplace, objSAWB_clip_val, istraining
-    ):
+    def forward(ctx, input, num_bits, dequantize, inplace, objSAWB_clip_val):
         if inplace:
-            ctx.mark_dirty(input_tensor)
+            ctx.mark_dirty(input)
         scale, zero_point = asymmetric_linear_quantization_params(
             num_bits, saturation_min=0, saturation_max=1, signed=False
         )  # returns scale = 2^bits-1, zero_point = 0
-
-        if istraining:
-            # only recalc clipval under training mode
-            if num_bits in [2, 3, 4, 5]:  # 8
-                clip_val = sawb_params(num_bits, input_tensor)
-            else:
-                clip_val = input_tensor.abs().max()
-        else:
-            # do not recalc clipval when under eval mode
-            clip_val = objSAWB_clip_val
+        num_bits_int = (
+            num_bits.item() if isinstance(num_bits, torch.Tensor) else num_bits
+        )
+        clip_val = sawb_params(num_bits_int, input)
 
         if len(clip_val.shape) == 0:
             clip_val = clip_val.unsqueeze(dim=0)
         objSAWB_clip_val.copy_(clip_val)
-        output = input_tensor.mul(1 / clip_val).clamp(-1, 1).mul(0.5).add(0.5)
+
+        output = input.mul(1 / clip_val).clamp(-1, 1).mul(0.5).add(0.5)
         output = linear_quantize(output, scale, zero_point, inplace)
         if dequantize:
             output = linear_dequantize(output, scale, zero_point, inplace)
-        output = (2 * output - 1) * clip_val
+            output = (2 * output - 1) * clip_val
+        else:
+            # Transform [0,2**b-1] -> [-2**(b-1),2**(b-1)-1]
+            output = (output - 2 ** (num_bits - 1)).to(torch.int8)
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
-        grad_input_tensor = grad_output.clone()
-        return grad_input_tensor, None, None, None, None, None
+        grad_input = grad_output.clone()
+        return grad_input, None, None, None, None
 
 
 class SAWBSTE(torch.autograd.Function):
@@ -720,49 +716,44 @@ class SAWBSTE(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(
-        ctx, input_tensor, num_bits, dequantize, inplace, objSAWB_clip_val, istraining
-    ):
+    def forward(ctx, input, num_bits, dequantize, inplace, objSAWB_clip_val):
         if inplace:
-            ctx.mark_dirty(input_tensor)
+            ctx.mark_dirty(input)
         scale, zero_point = asymmetric_linear_quantization_params(
             num_bits, saturation_min=0, saturation_max=1, signed=False
         )
-        if istraining:
-            if num_bits in [2, 3, 4, 5]:
-                clip_val = sawb_params(num_bits, input_tensor)
-            else:
-                clip_val = input_tensor.abs().max()
-        else:
-            # do not recalc clipval when under eval mode
-            clip_val = objSAWB_clip_val
+        num_bits_int = (
+            num_bits.item() if isinstance(num_bits, torch.Tensor) else num_bits
+        )
+        clip_val = sawb_params(num_bits_int, input)
 
+        # if clip_val.device.index%8==1:
         if len(clip_val.shape) == 0:
             clip_val = clip_val.unsqueeze(dim=0)
         objSAWB_clip_val.copy_(clip_val)
-        output = input_tensor.mul(1 / clip_val).clamp(-1, 1).mul(0.5).add(0.5)
+
+        output = input.mul(1 / clip_val).clamp(-1, 1).mul(0.5).add(0.5)
         output = linear_quantize(output, scale, zero_point, inplace)
         if dequantize:
             output = linear_dequantize(output, scale, zero_point, inplace)
-        output = (2 * output - 1) * clip_val
-        ctx.save_for_backward(input_tensor, clip_val)
+            output = (2 * output - 1) * clip_val
+        else:
+            # Transform [0,2**b-1] -> [-2**(b-1),2**(b-1)-1]
+            output = (output - 2 ** (num_bits - 1)).to(torch.int8)
+        ctx.save_for_backward(input, clip_val)
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
-        input_tensor, clip_val = ctx.saved_tensors
-        grad_input_tensor = grad_output.clone()
-        grad_input_tensor = torch.where(
-            input_tensor < -clip_val,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        input, clip_val = ctx.saved_tensors
+        grad_input = grad_output.clone()
+        grad_input = torch.where(
+            input < -clip_val, torch.zeros_like(grad_input), grad_input
         )
-        grad_input_tensor = torch.where(
-            input_tensor > clip_val,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        grad_input = torch.where(
+            input > clip_val, torch.zeros_like(grad_input), grad_input
         )
-        return grad_input_tensor, None, None, None, None, None
+        return grad_input, None, None, None, None
 
 
 def sawb_params(num_bits, out):
@@ -778,10 +769,15 @@ def sawb_params(num_bits, out):
             5: (17.74, -18.64),
             8: (31.76, -35.04),
         }
+        num_bits = num_bits.item() if isinstance(num_bits, torch.Tensor) else num_bits
         if num_bits > 8:
             raise ValueError(f"SAWB not implemented for num_bits={num_bits}")
         coeff = dic_coeff[num_bits]
         clip_val = coeff[1] * mu + coeff[0] * std
+
+        # Overwrite negative clip_vals with abs.max
+        if clip_val < 0.0:
+            clip_val = x.abs().max()
 
         return clip_val
 
@@ -797,14 +793,14 @@ class PACT(nn.Module):
         self,
         num_bits,
         init_clip_val,
-        init_clip_valn=0,  # pylint: disable=unused-argument
+        init_clip_valn=0,
         dequantize=True,
         inplace=False,
         cggrad=False,
         grad_scale=False,
         pact_plus=False,
     ):
-        super().__init__()
+        super(PACT, self).__init__()
         self.num_bits = num_bits
         if isinstance(init_clip_val, torch.Tensor):
             self.clip_val = nn.Parameter(init_clip_val)
@@ -814,33 +810,49 @@ class PACT(nn.Module):
         self.inplace = inplace
         self.cggrad = cggrad
         self.grad_scale = grad_scale
+        self.pact_plus = pact_plus
 
         self.quantizer = (
             CGPACT_STE
             if self.cggrad
             else PACTplusSTE
-            if pact_plus
+            if self.pact_plus
             else CGPACT_gScale_STE
             if self.grad_scale
             else PACT_STE
         )
 
-    def forward(self, input_tensor):
-        input_tensor = self.quantizer.apply(
-            input_tensor,
+    def set_quantizer(self):
+        self.quantizer = (
+            CGPACT_STE
+            if self.cggrad
+            else PACTplusSTE
+            if self.pact_plus
+            else CGPACT_gScale_STE
+            if self.grad_scale
+            else PACT_STE
+        )
+
+    def forward(self, input):
+        input = self.quantizer.apply(
+            input,
             self.clip_val,
             self.num_bits,
             self.dequantize,
             self.inplace,
         )
-        return input_tensor
+        return input
 
     def __repr__(self):
         inplace_str = ", inplace" if self.inplace else ""
-        return (
-            f"{self.__class__.__name__}(num_bits={self.num_bits}, clip_val={self.clip_val[0]}, "
-            f"cggrad={self.cggrad}, grad_scale={self.grad_scale}, quantizer={self.quantizer}, "
-            f"{inplace_str})"
+        return "{0}(num_bits={1}, clip_val={2}, cggrad={3}, grad_scale={4}, quantizer={5}, {6})".format(
+            self.__class__.__name__,
+            self.num_bits,
+            self.clip_val[0],
+            self.cggrad,
+            self.grad_scale,
+            self.quantizer,
+            inplace_str,
         )
 
 
@@ -848,50 +860,46 @@ class PACT_STE(torch.autograd.Function):
     """1-sided original PACT"""
 
     @staticmethod
-    def forward(ctx, input_tensor, clip_val, num_bits, dequantize, inplace):
-        clip_val = clip_val.to(input_tensor.dtype)
-        ctx.save_for_backward(input_tensor, clip_val)
+    def forward(ctx, input, clip_val, num_bits, dequantize, inplace):
+        clip_val = clip_val.to(input.dtype)
+        ctx.save_for_backward(input, clip_val)
         if inplace:
-            ctx.mark_dirty(input_tensor)
+            ctx.mark_dirty(input)
         scale, zero_point = asymmetric_linear_quantization_params(
             num_bits, saturation_min=0, saturation_max=clip_val.data, signed=False
         )
         if isinstance(clip_val, torch.Tensor):
-            if input_tensor.min() < 0:
-                raise ValueError(
-                    "FMS: input_tensor to single_side PACT should be non-negative."
-                )
+            if input.min() < 0:
+                raise ValueError("input to single_side PACT should be non-negative.")
             output = torch.where(
-                input_tensor > clip_val,
-                torch.ones_like(input_tensor) * clip_val,
-                input_tensor,
+                input > clip_val, torch.ones_like(input) * clip_val, input
             )
         else:
-            output = clamp(input_tensor, 0, clip_val.data, inplace=inplace)
+            output = clamp(input, min=0, max=clip_val.data, inplace=inplace)
+
         output = linear_quantize(output, scale, zero_point, inplace)
         if dequantize:
             output = linear_dequantize(output, scale, zero_point, inplace)
+        else:
+            quant_max = 2**num_bits - 1
+            output = output.clamp(0, quant_max).to(torch.uint8)
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
-        input_tensor, clip_val = ctx.saved_tensors
-        grad_input_tensor = grad_output.clone()
-        grad_input_tensor = torch.where(
-            input_tensor < 0, torch.zeros_like(grad_input_tensor), grad_input_tensor
-        )
-        grad_input_tensor = torch.where(
-            input_tensor > clip_val,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        input, clip_val = ctx.saved_tensors
+        grad_input = grad_output.clone()
+        grad_input = torch.where(input < 0, torch.zeros_like(grad_input), grad_input)
+        grad_input = torch.where(
+            input > clip_val, torch.zeros_like(grad_input), grad_input
         )
 
         grad_alpha = grad_output.clone()
         grad_alpha = torch.where(
-            input_tensor < clip_val, torch.zeros_like(grad_alpha), grad_alpha
+            input < clip_val, torch.zeros_like(grad_alpha), grad_alpha
         )
         grad_alpha = grad_alpha.sum().expand_as(clip_val)
-        return grad_input_tensor, grad_alpha, None, None, None, None
+        return grad_input, grad_alpha, None, None, None, None
 
 
 class CGPACT_STE(torch.autograd.Function):
@@ -900,25 +908,23 @@ class CGPACT_STE(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, input_tensor, clip_val, num_bits, dequantize, inplace):
-        ctx.save_for_backward(input_tensor, clip_val)
+    def forward(ctx, input, clip_val, num_bits, dequantize, inplace):
+        ctx.save_for_backward(input, clip_val)
         if inplace:
-            ctx.mark_dirty(input_tensor)
+            ctx.mark_dirty(input)
         scale, zero_point = asymmetric_linear_quantization_params(
             num_bits, 0, clip_val.data, signed=False
         )
         if isinstance(clip_val, torch.Tensor):
-            if input_tensor.min() < 0:
+            if input.min() < 0:
                 raise ValueError(
-                    "FMS: input_tensor to ClippedLinearQuantization should be non-negative."
+                    "input to ClippedLinearQuantization should be non-negative."
                 )
             output = torch.where(
-                input_tensor > clip_val,
-                torch.ones_like(input_tensor) * clip_val,
-                input_tensor,
+                input > clip_val, torch.ones_like(input) * clip_val, input
             )
         else:
-            output = clamp(input_tensor, 0, clip_val.data, inplace=inplace)
+            output = clamp(input, min=0, max=clip_val.data, inplace=inplace)
         output, ctx.residual = linear_quantize_residual(
             output, scale, zero_point, inplace
         )
@@ -932,24 +938,20 @@ class CGPACT_STE(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        input_tensor, clip_val = ctx.saved_tensors
-        grad_input_tensor = grad_output.clone()
+        input, clip_val = ctx.saved_tensors
+        grad_input = grad_output.clone()
 
-        grad_input_tensor = torch.where(
-            input_tensor < 0, torch.zeros_like(grad_input_tensor), grad_input_tensor
-        )
-        grad_input_tensor = torch.where(
-            input_tensor > clip_val,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        grad_input = torch.where(input < 0, torch.zeros_like(grad_input), grad_input)
+        grad_input = torch.where(
+            input > clip_val, torch.zeros_like(grad_input), grad_input
         )
 
         grad_alpha = grad_output.clone()
         grad_alpha = torch.where(
-            input_tensor < clip_val, grad_alpha * ctx.residual, grad_alpha
+            input < clip_val, grad_alpha * ctx.residual, grad_alpha
         )
         grad_alpha = grad_alpha.sum().expand_as(clip_val)
-        return grad_input_tensor, grad_alpha, None, None, None
+        return grad_input, grad_alpha, None, None, None
 
 
 class CGPACT_gScale_STE(torch.autograd.Function):
@@ -958,25 +960,23 @@ class CGPACT_gScale_STE(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, input_tensor, clip_val, num_bits, dequantize, inplace):
-        ctx.save_for_backward(input_tensor, clip_val)
+    def forward(ctx, input, clip_val, num_bits, dequantize, inplace):
+        ctx.save_for_backward(input, clip_val)
         if inplace:
-            ctx.mark_dirty(input_tensor)
+            ctx.mark_dirty(input)
         scale, zero_point = asymmetric_linear_quantization_params(
             num_bits, saturation_min=0, saturation_max=clip_val.data, signed=False
         )
         if isinstance(clip_val, torch.Tensor):
-            if input_tensor.min() < 0:
+            if input.min() < 0:
                 raise ValueError(
-                    "FMS: input_tensor to ClippedLinearQuantization should be non-negative."
+                    "input to ClippedLinearQuantization should be non-negative."
                 )
             output = torch.where(
-                input_tensor > clip_val,
-                torch.ones_like(input_tensor) * clip_val,
-                input_tensor,
+                input > clip_val, torch.ones_like(input) * clip_val, input
             )
         else:
-            output = clamp(input_tensor, 0, clip_val.data, inplace=inplace)
+            output = clamp(input, min=0, max=clip_val.data, inplace=inplace)
         output, ctx.residual = linear_quantize_residual(
             output, scale, zero_point, inplace
         )
@@ -990,84 +990,77 @@ class CGPACT_gScale_STE(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        input_tensor, clip_val = ctx.saved_tensors
-        grad_input_tensor = grad_output.clone()
+        input, clip_val = ctx.saved_tensors
+        grad_input = grad_output.clone()
 
-        grad_input_tensor = torch.where(
-            input_tensor < 0, torch.zeros_like(grad_input_tensor), grad_input_tensor
-        )
-        grad_input_tensor = torch.where(
-            input_tensor > clip_val,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        grad_input = torch.where(input < 0, torch.zeros_like(grad_input), grad_input)
+        grad_input = torch.where(
+            input > clip_val, torch.zeros_like(grad_input), grad_input
         )
 
         grad_alpha = grad_output.clone()
         grad_alpha = torch.where(
-            input_tensor < clip_val, grad_alpha * ctx.residual, grad_alpha
+            input < clip_val, grad_alpha * ctx.residual, grad_alpha
         )
         grad_alpha = grad_alpha.sum().expand_as(clip_val)
         ndim = float(sum(list(grad_output.shape)))
         grad_scale = math.sqrt(1 / ndim / 3.0)  # 3 is for 2bit, should be n
-        return grad_input_tensor, grad_alpha * grad_scale, None, None, None
+        return grad_input, grad_alpha * grad_scale, None, None, None
 
 
-# Single-sided PACT+, simplified version, no LUT support
 class PACTplusSTE(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input_tensor, clip_val, num_bits, dequantize, inplace):
-        clip_val = clip_val.to(input_tensor.dtype)
+    def forward(ctx, input, clip_val, num_bits, dequantize, inplace):
+        clip_val = clip_val.to(input.dtype)
         n_levels = 2**num_bits - 1
-        scale = n_levels / clip_val
+        scale, zero_point = asymmetric_linear_quantization_params(
+            num_bits, saturation_min=0, saturation_max=clip_val.data, signed=False
+        )
         stepsize = 1.0 / scale
         # --- zp is not needed for single-sided PACT
-        ctx.save_for_backward(input_tensor, clip_val)
+        ctx.save_for_backward(input, clip_val)
 
         if inplace:
-            ctx.mark_dirty(input_tensor)
+            ctx.mark_dirty(input)
         ctx.n_levels = n_levels
         ctx.n_bits = num_bits
         ctx.stepsize = stepsize
 
         if isinstance(clip_val, torch.Tensor):
-            output = torch.clamp(input_tensor, torch.zeros_like(clip_val), clip_val)
+            output = torch.clamp(input, min=torch.zeros_like(clip_val), max=clip_val)
         else:
-            output = clamp(input_tensor, 0, clip_val.data, inplace=inplace)
+            output = clamp(input, min=0, max=clip_val.data, inplace=inplace)
 
-        output = torch.round(output / stepsize.to(output.device))
+        output = linear_quantize(output, scale, zero_point, inplace)
         if dequantize:
-            output = output * stepsize.to(output.device)
+            output = linear_dequantize(output, scale, zero_point, inplace)
+        else:
+            output = output.clamp(0, n_levels).to(torch.uint8)
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
-        input_tensor, clip_val = ctx.saved_tensors
+        input, clip_val = ctx.saved_tensors
         n_levels = ctx.n_levels
         stepsize = ctx.stepsize
-        z = input_tensor / stepsize
+        z = input * stepsize
 
         # direct compute grad_alpha
-        grad_input_tensor = grad_output.clone()
+        grad_input = grad_output.clone()
         delz = (z - torch.round(z)) / n_levels
         grad_alpha = -grad_output.clone() * delz
 
-        grad_input_tensor = torch.where(
-            input_tensor <= 0, torch.zeros_like(grad_input_tensor), grad_input_tensor
-        )
-        grad_input_tensor = torch.where(
-            input_tensor >= clip_val,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        grad_input = torch.where(input <= 0, torch.zeros_like(grad_input), grad_input)
+        grad_input = torch.where(
+            input >= clip_val, torch.zeros_like(grad_input), grad_input
         )
 
-        grad_alpha = torch.where(
-            input_tensor <= 0, torch.zeros_like(grad_alpha), grad_alpha
-        )
-        grad_alpha = torch.where(input_tensor >= clip_val, grad_output, grad_alpha)
+        grad_alpha = torch.where(input <= 0, torch.zeros_like(grad_alpha), grad_alpha)
+        grad_alpha = torch.where(input >= clip_val, grad_output, grad_alpha)
 
         grad_alpha = grad_alpha.sum().expand_as(clip_val)
 
-        return grad_input_tensor, grad_alpha, None, None, None, None
+        return grad_input, grad_alpha, None, None, None, None
 
 
 class PACTplusSymSTE_rev1(torch.autograd.Function):
@@ -1076,7 +1069,7 @@ class PACTplusSymSTE_rev1(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
-        input_tensor,
+        input,
         clip_val,
         num_bits,
         dequantize,
@@ -1084,74 +1077,73 @@ class PACTplusSymSTE_rev1(torch.autograd.Function):
         intg_zp,
         OORgradnoclip,
     ):
-        clip_val = clip_val.to(input_tensor.dtype)
-        n_levels = 2**num_bits - 2 if intg_zp else 2**num_bits - 1
-        scale = n_levels / (2 * clip_val)
+        clip_val = clip_val.to(input.dtype)
+        n_levels = 2**num_bits - 2
+        qmax = (
+            2 ** (num_bits - 1) - 1
+        )  # upper clamping on integer value (INT8: 127, INT4: 7)
+        qmin = -qmax
+        scale = (
+            2 * clip_val / n_levels
+        )  # for symmetry: clip_val - clip_valn = 2 * clip_val
         stepsize = 1.0 / scale
 
-        ctx.save_for_backward(input_tensor, clip_val)
+        ctx.save_for_backward(input, clip_val)
         if inplace:
-            ctx.mark_dirty(input_tensor)
+            ctx.mark_dirty(input)
         ctx.n_levels = n_levels
         ctx.n_bits = num_bits
         ctx.stepsize = stepsize
         ctx.OORgradnoclip = OORgradnoclip
         if isinstance(clip_val, torch.Tensor):
             output = torch.where(
-                input_tensor > clip_val,
-                torch.ones_like(input_tensor) * clip_val,
-                input_tensor,
+                input > clip_val, torch.ones_like(input) * clip_val, input
             )
             output = torch.where(
-                output < -clip_val, torch.ones_like(input_tensor) * -clip_val, output
+                output < -clip_val, torch.ones_like(input) * -clip_val, output
             )
         else:
-            output = clamp(input_tensor, -clip_val.data, clip_val.data, inplace=inplace)
+            output = clamp(
+                input, min=-clip_val.data, max=clip_val.data, inplace=inplace
+            )
 
-        output = torch.round((output + clip_val) / stepsize.to(output.device))
+        output = torch.round(output / scale).clamp(qmin, qmax)
         if dequantize:
-            output = output * stepsize.to(output.device) - clip_val
+            output *= scale
         else:
-            # TODO: fix inconsistency:
-            # SAWB and Qmax use a different definition for scale, where
-            # "scale = 2^b-2", not divided by 2*clip_val
-            output -= torch.round(clip_val * scale)
+            output = output.to(torch.int8)
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
-        input_tensor, clip_val = ctx.saved_tensors
+        input, clip_val = ctx.saved_tensors
         n_levels = ctx.n_levels
         stepsize = ctx.stepsize
         OORgradclip = not ctx.OORgradnoclip
-        z = (input_tensor + clip_val) / stepsize
+        z = (input + clip_val) * stepsize
         delz = 2 * (torch.round(z) - z) / n_levels
 
-        grad_input_tensor = grad_output.clone()
+        grad_input = grad_output.clone()
         if OORgradclip:
-            grad_input_tensor = torch.where(
-                input_tensor <= (-clip_val),
-                torch.zeros_like(grad_input_tensor),
-                grad_input_tensor,
+            grad_input = torch.where(
+                input <= (-clip_val), torch.zeros_like(grad_input), grad_input
             )
-            grad_input_tensor = torch.where(
-                input_tensor >= clip_val,
-                torch.zeros_like(grad_input_tensor),
-                grad_input_tensor,
+            grad_input = torch.where(
+                input >= clip_val, torch.zeros_like(grad_input), grad_input
             )
 
         grad_alpha = torch.ones_like(grad_output) * delz
         grad_alpha = torch.where(
-            input_tensor <= -clip_val, -torch.ones_like(grad_input_tensor), grad_alpha
+            input <= -clip_val, -torch.ones_like(grad_input), grad_alpha
         )
         grad_alpha = torch.where(
-            input_tensor >= clip_val, torch.ones_like(grad_input_tensor), grad_alpha
+            input >= clip_val, torch.ones_like(grad_input), grad_alpha
         )
         grad_alpha *= grad_output
 
         grad_alpha = grad_alpha.sum().expand_as(clip_val)
 
-        return grad_input_tensor, grad_alpha, None, None, None, None, None, None
+        return grad_input, grad_alpha, None, None, None, None, None, None
 
 
 class PACTplusExtendRangeSTE(torch.autograd.Function):
@@ -1169,7 +1161,7 @@ class PACTplusExtendRangeSTE(torch.autograd.Function):
         b = 4 --> [-8/7 * clip_val, clip_val]
 
     Zero alignment (FP=0 --> INT=0 --> FP=0) is guaranteed
-    Out Of Range input_tensor grad clipping is always enabled
+    Out Of Range input grad clipping is always enabled
     No in_place functionalities
     No Automatic Mixed Precision (AMP) functionalities
     Dequantization is functional
@@ -1178,70 +1170,63 @@ class PACTplusExtendRangeSTE(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
-        input_tensor,
+        input,
         clip_val,
         num_bits,
         dequantize,
-        _inplace,  # not in use
-        _intg_zp,  # not in use
-        _OORgradnoclip,  # not in use
+        inplace,
+        intg_zp,
+        OORgradnoclip,
     ):
         n_half = 2 ** (num_bits - 1)  # levels in half range: 8b: 128; 4b: 8; 2b: 2
         clip_valn = -clip_val * n_half / (n_half - 1)  # 8b: -128/127 * clip_val
         stepsize = clip_val / (n_half - 1)
 
-        ctx.save_for_backward(input_tensor, clip_val, clip_valn, stepsize)
+        ctx.save_for_backward(input, clip_val, clip_valn, stepsize)
         ctx.n_half = n_half
 
-        # clip input_tensor distribution on both sides
+        # clip input distribution on both sides
+        output = torch.where(input > clip_val, torch.ones_like(input) * clip_val, input)
         output = torch.where(
-            input_tensor > clip_val,
-            torch.ones_like(input_tensor) * clip_val,
-            input_tensor,
-        )
-        output = torch.where(
-            output < clip_valn, torch.ones_like(input_tensor) * clip_valn, output
+            output < clip_valn, torch.ones_like(input) * clip_valn, output
         )
 
         # quantize to range [-2^(b-1), 2^(b-1)-1]
         output = torch.round(output / stepsize)
-
         if dequantize:
             output = output * stepsize
+        else:
+            output = output.clamp(-n_half, n_half - 1).to(torch.int8)
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
-        input_tensor, clip_val, clip_valn, stepsize = ctx.saved_tensors
+        input, clip_val, clip_valn, stepsize = ctx.saved_tensors
         n_half = ctx.n_half
 
-        grad_input_tensor = grad_output.clone()
-        grad_input_tensor = torch.where(
-            input_tensor <= clip_valn,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        grad_input = grad_output.clone()
+        grad_input = torch.where(
+            input <= clip_valn, torch.zeros_like(grad_input), grad_input
         )
-        grad_input_tensor = torch.where(
-            input_tensor >= clip_val,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        grad_input = torch.where(
+            input >= clip_val, torch.zeros_like(grad_input), grad_input
         )
 
-        z = (input_tensor - clip_valn) / stepsize
+        z = (input - clip_valn) / stepsize
         grad_alpha = (torch.round(z) - z) / (n_half - 1)
         grad_alpha = torch.where(
-            input_tensor <= clip_valn,
-            clip_valn / clip_val * torch.ones_like(grad_input_tensor),
+            input <= clip_valn,
+            clip_valn / clip_val * torch.ones_like(grad_input),
             grad_alpha,
         )
         grad_alpha = torch.where(
-            input_tensor >= clip_val, torch.ones_like(grad_input_tensor), grad_alpha
+            input >= clip_val, torch.ones_like(grad_input), grad_alpha
         )
         grad_alpha *= grad_output
 
         grad_alpha = grad_alpha.sum().expand_as(clip_val)
 
-        return grad_input_tensor, grad_alpha, None, None, None, None, None, None
+        return grad_input, grad_alpha, None, None, None, None, None, None
 
 
 class PACTplusSym(nn.Module):
@@ -1270,23 +1255,26 @@ class PACTplusSym(nn.Module):
         self.dequantize = dequantize
         self.inplace = inplace
         self.intg_zp = intg_zp
-        self.OORgradnoclip = (
-            OORgradnoclip  # disable Out Of Range input_tensor grad clipping
-        )
-        if not extend_act_range:
+        self.OORgradnoclip = OORgradnoclip  # disable Out Of Range input grad clipping
+        self.extend_act_range = extend_act_range
+
+        self.set_quantizer()
+
+    def set_quantizer(self):
+        if not self.extend_act_range:
             self.quantizer = PACTplusSymSTE_rev1
             self.quantizer_name = "PACT+sym"
         else:
             self.quantizer = PACTplusExtendRangeSTE
             self.quantizer_name = "PACT+extend"
-        # TODO why is there duplicated codes? clean up needed
-        self.quantizer = (
-            PACTplusSymSTE_rev1 if not extend_act_range else PACTplusExtendRangeSTE
-        )
 
-    def forward(self, input_tensor):
-        input_tensor = self.quantizer.apply(
-            input_tensor,
+    def set_extend_act_range(self, extend_act_range):
+        self.extend_act_range = extend_act_range
+        self.set_quantizer()
+
+    def forward(self, input, *args, **kwargs):
+        input = self.quantizer.apply(
+            input,
             self.clip_val,
             self.num_bits,
             self.dequantize,
@@ -1294,7 +1282,7 @@ class PACTplusSym(nn.Module):
             self.intg_zp,
             self.OORgradnoclip,
         )
-        return input_tensor
+        return input
 
     def __repr__(self):
         inplace_str = ", inplace" if self.inplace else ""
@@ -1308,62 +1296,67 @@ class PACT2Sym_STE(torch.autograd.Function):
     """Symmetric with zero in the center. For example, 4bit -- > [-7, 7] with FP0 align to INT0"""
 
     @staticmethod
-    def forward(ctx, input_tensor, clip_val, num_bits, dequantize, inplace):
-        clip_val = clip_val.to(input_tensor.dtype)
-        ctx.save_for_backward(input_tensor, clip_val)
+    def forward(ctx, input, clip_val, num_bits, dequantize, inplace):
+        clip_val = clip_val.to(input.dtype)
+        ctx.save_for_backward(input, clip_val)
+
         if inplace:
-            ctx.mark_dirty(input_tensor)
+            ctx.mark_dirty(input)
         scale, zero_point = symmetric_linear_quantization_params(
             num_bits, clip_val.data
         )
+
         if isinstance(clip_val, torch.Tensor):
             output = torch.where(
-                input_tensor > clip_val,
-                torch.ones_like(input_tensor) * clip_val,
-                input_tensor,
+                input > clip_val, torch.ones_like(input) * clip_val, input
             )
             output = torch.where(
-                output < -clip_val, torch.ones_like(input_tensor) * (-clip_val), output
+                output < -clip_val, torch.ones_like(input) * (-clip_val), output
             )
         else:
-            output = clamp(input_tensor, -clip_val.data, clip_val.data, inplace)
+            output = clamp(input, -clip_val.data, clip_val.data, inplace)
+
         output = linear_quantize(output, scale, zero_point, inplace)
         if dequantize:
             output = linear_dequantize(output, scale, zero_point, inplace)
+        else:
+            quant_range = 2 ** (num_bits - 1)
+            quant_min, quant_max = (
+                -quant_range + 1,
+                quant_range - 1,
+            )  # [-7,7],[-127,127]
+            output = output.clamp(quant_min, quant_max).to(torch.int8)
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
-        input_tensor, clip_val = ctx.saved_tensors
-        grad_input_tensor = grad_output.clone()
-        grad_input_tensor = torch.where(
-            input_tensor <= -clip_val,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        input, clip_val = ctx.saved_tensors
+        grad_input = grad_output.clone()
+        grad_input = torch.where(
+            input <= -clip_val, torch.zeros_like(grad_input), grad_input
         )
-        grad_input_tensor = torch.where(
-            input_tensor >= clip_val,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        grad_input = torch.where(
+            input >= clip_val, torch.zeros_like(grad_input), grad_input
         )
 
         grad_alpha = grad_output.clone()
         grad_alpha = torch.where(
-            torch.logical_and(input_tensor < clip_val, input_tensor > -clip_val),
+            torch.logical_and(input < clip_val, input > -clip_val),
             torch.zeros_like(grad_alpha),
             grad_alpha,
         )
         grad_alpha = grad_alpha.sum().expand_as(clip_val)
 
-        return grad_input_tensor, grad_alpha, None, None, None, None
+        return grad_input, grad_alpha, None, None, None, None
 
 
-# for symmetric pact2 mainly for QBMM, can
 class PACT2Sym(nn.Module):
     """Two-sided PACT with symmetric clip values"""
 
-    def __init__(self, num_bits, init_clip_val=8.0, dequantize=True, inplace=False):
-        super().__init__()
+    def __init__(
+        self, num_bits, init_clip_val=8.0, dequantize=True, inplace=False, **kwargs
+    ):
+        super(PACT2Sym, self).__init__()
         self.num_bits = num_bits
         if isinstance(init_clip_val, torch.Tensor):
             self.clip_val = nn.Parameter(init_clip_val)
@@ -1372,17 +1365,21 @@ class PACT2Sym(nn.Module):
 
         self.dequantize = dequantize
         self.inplace = inplace
+        self.use_PT_native_Qfunc = kwargs.get("use_PT_native_Qfunc", False)
         self.quantizer = PACT2Sym_STE
 
-    def forward(self, input_tensor):
-        input_tensor = self.quantizer.apply(
-            input_tensor,
+    def set_quantizer(self):
+        self.quantizer = PACT2Sym_STE
+
+    def forward(self, input):
+        input = self.quantizer.apply(
+            input,
             self.clip_val,
             self.num_bits,
             self.dequantize,
             self.inplace,
         )
-        return input_tensor
+        return input
 
     def __repr__(self):
         inplace_str = ", inplace" if self.inplace else ""
@@ -1412,7 +1409,7 @@ class PACT2(nn.Module):
         pact_plus=False,
         **kwargs,
     ):
-        super().__init__()
+        super(PACT2, self).__init__()
         self.num_bits = num_bits
         if isinstance(init_clip_val, torch.Tensor) and isinstance(
             init_clip_valn, torch.Tensor
@@ -1426,7 +1423,7 @@ class PACT2(nn.Module):
             self.clip_valn = nn.Parameter(torch.Tensor([init_clip_valn]))
         else:
             raise ValueError(
-                "FMS: init_clip_val and init_clip_valn  should be the same instance type."
+                "init_clip_val and init_clip_valn  should be the same instance type."
             )
         self.dequantize = dequantize
         self.inplace = inplace
@@ -1462,9 +1459,9 @@ class PACT2(nn.Module):
             else PACT2_STE
         )
 
-    def forward(self, input_tensor):
-        input_tensor = self.quantizer.apply(
-            input_tensor,
+    def forward(self, input):
+        input = self.quantizer.apply(
+            input,
             self.clip_val,
             self.clip_valn,
             self.num_bits,
@@ -1473,7 +1470,7 @@ class PACT2(nn.Module):
             self.align_zero,
             self.use_PT_native_Qfunc,
         )
-        return input_tensor
+        return input
 
     def __repr__(self):
         clip_str = (
@@ -1490,7 +1487,7 @@ class PACT2_STE(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
-        input_tensor,
+        input,
         clip_val,
         clip_valn,
         num_bits,
@@ -1499,13 +1496,10 @@ class PACT2_STE(torch.autograd.Function):
         align_zero,
         use_PT_native_Qfunc,
     ):
-        clip_val, clip_valn = (
-            clip_val.to(input_tensor.dtype),
-            clip_valn.to(input_tensor.dtype),
-        )
-        ctx.save_for_backward(input_tensor, clip_val, clip_valn)
+        clip_val, clip_valn = clip_val.to(input.dtype), clip_valn.to(input.dtype)
+        ctx.save_for_backward(input, clip_val, clip_valn)
         if inplace:
-            ctx.mark_dirty(input_tensor)
+            ctx.mark_dirty(input)
         scale, zero_point = asymmetric_linear_quantization_params(
             num_bits,
             clip_valn.data,
@@ -1543,10 +1537,13 @@ class PACT2_STE(torch.autograd.Function):
             scale = (clip_val - clip_valn) / n_levels  # overwrite scale
             zp = torch.round(-clip_valn / scale).to(torch.int)
             signed = (zp == 0).item()
-            qint_dtype = qint_dtype_dict.get((num_bits, signed))
+            num_bits_int = (
+                num_bits.item() if isinstance(num_bits, torch.Tensor) else num_bits
+            )
+            qint_dtype = qint_dtype_dict.get((num_bits_int, signed))
             int_dtype = int_dtype_dict.get(qint_dtype)
-            input_tensor_dtype = (
-                input_tensor.dtype
+            input_dtype = (
+                input.dtype
             )  # fake_quantize_per_xxx doesn't support fp16 out of the box
 
             if zp != 0:
@@ -1559,33 +1556,28 @@ class PACT2_STE(torch.autograd.Function):
 
             if dequantize:
                 out = torch.fake_quantize_per_tensor_affine(
-                    input_tensor.float(), scale.float(), zp, quant_min, quant_max
+                    input.float(), scale.float(), zp, quant_min, quant_max
                 )
-                out = out.to(input_tensor_dtype)
+                return out.to(input_dtype)
             else:
                 # Clamp to [quant_min, quant_max] in case we are storing int4 into a uint8 tensor
                 out = (
-                    torch.quantize_per_tensor(
-                        input_tensor, scale.float(), zp, qint_dtype
-                    )
+                    torch.quantize_per_tensor(input, scale.float(), zp, qint_dtype)
                     .int_repr()
                     .clamp(quant_min, quant_max)
                 )
-            return out
-            # NOTE remember scale and zp from asym_lin_q_params is different from
-            # normal scale and zp def
+                return out  # do not cast back to input_dtype!
+            # remember scale/zp from asym_lin_q_params is different from normal scale and zp def
 
         if isinstance(clip_val, torch.Tensor):
             output = torch.where(
-                input_tensor > clip_val,
-                torch.ones_like(input_tensor) * clip_val,
-                input_tensor,
+                input > clip_val, torch.ones_like(input) * clip_val, input
             )
             output = torch.where(
-                output < clip_valn, torch.ones_like(input_tensor) * clip_valn, output
+                output < clip_valn, torch.ones_like(input) * clip_valn, output
             )
         else:
-            output = clamp(input_tensor, clip_valn.data, clip_val.data, inplace)
+            output = clamp(input, clip_valn.data, clip_val.data, inplace)
 
         output = linear_quantize(output, scale, zero_point, inplace)
         if dequantize:
@@ -1597,52 +1589,38 @@ class PACT2_STE(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        input_tensor, clip_val, clip_valn = ctx.saved_tensors
-        grad_input_tensor = grad_output.clone()
-        grad_input_tensor = torch.where(
-            input_tensor <= clip_valn,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        input, clip_val, clip_valn = ctx.saved_tensors
+        grad_input = grad_output.clone()
+        grad_input = torch.where(
+            input <= clip_valn, torch.zeros_like(grad_input), grad_input
         )
-        grad_input_tensor = torch.where(
-            input_tensor >= clip_val,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        grad_input = torch.where(
+            input >= clip_val, torch.zeros_like(grad_input), grad_input
         )
 
         grad_alpha = grad_output.clone()
         grad_alpha = torch.where(
-            input_tensor < clip_val, torch.zeros_like(grad_alpha), grad_alpha
+            input < clip_val, torch.zeros_like(grad_alpha), grad_alpha
         )
         grad_alpha = grad_alpha.sum().expand_as(clip_val)
 
         grad_alphan = grad_output.clone()
         grad_alphan = torch.where(
-            input_tensor > clip_valn, torch.zeros_like(grad_alphan), grad_alphan
+            input > clip_valn, torch.zeros_like(grad_alphan), grad_alphan
         )
         grad_alphan = grad_alphan.sum().expand_as(clip_valn)
         # Straight-through estimator for the scale factor calculation
-        return (
-            grad_input_tensor,
-            grad_alpha,
-            grad_alphan,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        return grad_input, grad_alpha, grad_alphan, None, None, None, None, None, None
 
 
 class CGPACT2_STE(torch.autograd.Function):
     """2-sided CGPACT"""
 
     @staticmethod
-    def forward(ctx, input_tensor, clip_val, clip_valn, num_bits, dequantize, inplace):
-        ctx.save_for_backward(input_tensor, clip_val, clip_valn)
+    def forward(ctx, input, clip_val, clip_valn, num_bits, dequantize, inplace):
+        ctx.save_for_backward(input, clip_val, clip_valn)
         if inplace:
-            ctx.mark_dirty(input_tensor)
+            ctx.mark_dirty(input)
         scale, zero_point = asymmetric_linear_quantization_params(
             num_bits,
             clip_valn.data,
@@ -1652,20 +1630,19 @@ class CGPACT2_STE(torch.autograd.Function):
         )
         if isinstance(clip_val, torch.Tensor):
             output = torch.where(
-                input_tensor > clip_val,
-                torch.ones_like(input_tensor) * clip_val,
-                input_tensor,
+                input > clip_val, torch.ones_like(input) * clip_val, input
             )
             output = torch.where(
-                output < clip_valn, torch.ones_like(input_tensor) * clip_valn, output
+                output < clip_valn, torch.ones_like(input) * clip_valn, output
             )
         else:
-            output = clamp(input_tensor, clip_valn.data, clip_val.data, inplace)
+            output = clamp(input, clip_valn.data, clip_val.data, inplace)
         output, ctx.residual = linear_quantize_residual(
             output, scale, zero_point, inplace
         )
         with torch.no_grad():
             n = (2**num_bits - 1) / 2.0
+            #           ctx.residual /= n
             ctx.residual.div_(n).sub_(1.0)
 
         if dequantize:
@@ -1674,48 +1651,44 @@ class CGPACT2_STE(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        input_tensor, clip_val, clip_valn = ctx.saved_tensors
-        grad_input_tensor = grad_output.clone()
-        grad_input_tensor = torch.where(
-            input_tensor <= clip_valn,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        input, clip_val, clip_valn = ctx.saved_tensors
+        grad_input = grad_output.clone()
+        grad_input = torch.where(
+            input <= clip_valn, torch.zeros_like(grad_input), grad_input
         )
-        grad_input_tensor = torch.where(
-            input_tensor >= clip_val,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        grad_input = torch.where(
+            input >= clip_val, torch.zeros_like(grad_input), grad_input
         )
 
         grad_alpha = grad_output.clone()
         grad_alpha = torch.where(
-            ((input_tensor < clip_val) & (input_tensor > clip_valn)),
+            ((input < clip_val) & (input > clip_valn)),
             grad_alpha * ctx.residual,
             grad_alpha,
         )
-        grad_alpha = torch.where(input_tensor <= clip_valn, -grad_alpha, grad_alpha)
+        grad_alpha = torch.where(input <= clip_valn, -grad_alpha, grad_alpha)
         grad_alpha = grad_alpha.sum().expand_as(clip_val)
 
         grad_alphan = grad_output.clone()
-        grad_alphan = torch.where(input_tensor >= clip_val, -grad_alphan, grad_alphan)
+        grad_alphan = torch.where(input >= clip_val, -grad_alphan, grad_alphan)
         grad_alphan = torch.where(
-            ((input_tensor < clip_val) & (input_tensor > clip_valn)),
+            ((input < clip_val) & (input > clip_valn)),
             -grad_alphan * ctx.residual,
             grad_alphan,
         )
         grad_alphan = grad_alphan.sum().expand_as(clip_valn)
         # Straight-through estimator for the scale factor calculation
-        return grad_input_tensor, grad_alpha, grad_alphan, None, None, None
+        return grad_input, grad_alpha, grad_alphan, None, None, None
 
 
 class CGPACT2_gScale_STE(torch.autograd.Function):
     """2-sided CGPACT + scale alpha gradients"""
 
     @staticmethod
-    def forward(ctx, input_tensor, clip_val, clip_valn, num_bits, dequantize, inplace):
-        ctx.save_for_backward(input_tensor, clip_val, clip_valn)
+    def forward(ctx, input, clip_val, clip_valn, num_bits, dequantize, inplace):
+        ctx.save_for_backward(input, clip_val, clip_valn)
         if inplace:
-            ctx.mark_dirty(input_tensor)
+            ctx.mark_dirty(input)
         scale, zero_point = asymmetric_linear_quantization_params(
             num_bits,
             clip_valn.data,
@@ -1725,15 +1698,13 @@ class CGPACT2_gScale_STE(torch.autograd.Function):
         )
         if isinstance(clip_val, torch.Tensor):
             output = torch.where(
-                input_tensor > clip_val,
-                torch.ones_like(input_tensor) * clip_val,
-                input_tensor,
+                input > clip_val, torch.ones_like(input) * clip_val, input
             )
             output = torch.where(
-                output < clip_valn, torch.ones_like(input_tensor) * clip_valn, output
+                output < clip_valn, torch.ones_like(input) * clip_valn, output
             )
         else:
-            output = clamp(input_tensor, clip_valn.data, clip_val.data, inplace)
+            output = clamp(input, clip_valn.data, clip_val.data, inplace)
         output, ctx.residual = linear_quantize_residual(
             output, scale, zero_point, inplace
         )
@@ -1747,32 +1718,28 @@ class CGPACT2_gScale_STE(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        input_tensor, clip_val, clip_valn = ctx.saved_tensors
-        grad_input_tensor = grad_output.clone()
-        grad_input_tensor = torch.where(
-            input_tensor <= clip_valn,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        input, clip_val, clip_valn = ctx.saved_tensors
+        grad_input = grad_output.clone()
+        grad_input = torch.where(
+            input <= clip_valn, torch.zeros_like(grad_input), grad_input
         )
-        grad_input_tensor = torch.where(
-            input_tensor >= clip_val,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        grad_input = torch.where(
+            input >= clip_val, torch.zeros_like(grad_input), grad_input
         )
 
         grad_alpha = grad_output.clone()
         grad_alpha = torch.where(
-            ((input_tensor < clip_val) & (input_tensor > clip_valn)),
+            ((input < clip_val) & (input > clip_valn)),
             grad_alpha * ctx.residual,
             grad_alpha,
         )
-        grad_alpha = torch.where(input_tensor <= clip_valn, -grad_alpha, grad_alpha)
+        grad_alpha = torch.where(input <= clip_valn, -grad_alpha, grad_alpha)
         grad_alpha = grad_alpha.sum().expand_as(clip_val)
 
         grad_alphan = grad_output.clone()
-        grad_alphan = torch.where(input_tensor >= clip_val, -grad_alphan, grad_alphan)
+        grad_alphan = torch.where(input >= clip_val, -grad_alphan, grad_alphan)
         grad_alphan = torch.where(
-            ((input_tensor < clip_val) & (input_tensor > clip_valn)),
+            ((input < clip_val) & (input > clip_valn)),
             -grad_alphan * ctx.residual,
             grad_alphan,
         )
@@ -1780,7 +1747,7 @@ class CGPACT2_gScale_STE(torch.autograd.Function):
         ndim = float(sum(list(grad_output.shape)))
         grad_scale = math.sqrt(1 / ndim / 3.0)
         return (
-            grad_input_tensor,
+            grad_input,
             grad_alpha * grad_scale,
             grad_alphan * grad_scale,
             None,
@@ -1790,17 +1757,16 @@ class CGPACT2_gScale_STE(torch.autograd.Function):
 
 
 class PACT2_Plus_STE(torch.autograd.Function):
-    """
-    2-sided CGPACT+direct gradient derivative:
-    i.e. assuming total independent of clip_val and clip_valn
+    """2-sided CGPACT+direct gradient derivative: i.e.
+    assuming total independent of clip_val and clip_valn
     one option is to use running mean for gradient
     """
 
     @staticmethod
-    def forward(ctx, input_tensor, clip_val, clip_valn, num_bits, dequantize, inplace):
-        ctx.save_for_backward(input_tensor, clip_val, clip_valn)
+    def forward(ctx, input, clip_val, clip_valn, num_bits, dequantize, inplace):
+        ctx.save_for_backward(input, clip_val, clip_valn)
         if inplace:
-            ctx.mark_dirty(input_tensor)
+            ctx.mark_dirty(input)
         scale, zero_point = asymmetric_linear_quantization_params(
             num_bits,
             clip_valn.data,
@@ -1810,21 +1776,20 @@ class PACT2_Plus_STE(torch.autograd.Function):
         )
         if isinstance(clip_val, torch.Tensor):
             output = torch.where(
-                input_tensor > clip_val,
-                torch.ones_like(input_tensor) * clip_val,
-                input_tensor,
+                input > clip_val, torch.ones_like(input) * clip_val, input
             )
             output = torch.where(
-                output < clip_valn, torch.ones_like(input_tensor) * clip_valn, output
+                output < clip_valn, torch.ones_like(input) * clip_valn, output
             )
         else:
-            output = clamp(input_tensor, clip_valn.data, clip_val.data, inplace)
+            output = clamp(input, clip_valn.data, clip_val.data, inplace)
         output, ctx.residual = linear_quantize_residual(
             output, scale, zero_point, inplace
         )
         # save quantization residue for clip_val grad computation in backprop
         with torch.no_grad():
             n = 2**num_bits - 1
+            #           ctx.residual /= n
             ctx.residual.div_(n)
 
         if dequantize:
@@ -1833,52 +1798,48 @@ class PACT2_Plus_STE(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        input_tensor, clip_val, clip_valn = ctx.saved_tensors
-        grad_input_tensor = grad_output.clone()
-        grad_input_tensor = torch.where(
-            input_tensor <= clip_valn,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        input, clip_val, clip_valn = ctx.saved_tensors
+        grad_input = grad_output.clone()
+        grad_input = torch.where(
+            input <= clip_valn, torch.zeros_like(grad_input), grad_input
         )
-        grad_input_tensor = torch.where(
-            input_tensor >= clip_val,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        grad_input = torch.where(
+            input >= clip_val, torch.zeros_like(grad_input), grad_input
         )
 
         grad_alpha = grad_output.clone()
         grad_alpha = torch.where(
-            ((input_tensor < clip_val) & (input_tensor > clip_valn)),
+            ((input < clip_val) & (input > clip_valn)),
             grad_alpha * ctx.residual,
             grad_alpha,
         )
         grad_alpha = torch.where(
-            input_tensor <= clip_valn, torch.zeros_like(grad_alpha), grad_alpha
+            input <= clip_valn, torch.zeros_like(grad_alpha), grad_alpha
         )
         grad_alpha = grad_alpha.sum().expand_as(clip_val)
 
         grad_alphan = grad_output.clone()
         grad_alphan = torch.where(
-            input_tensor >= clip_val, torch.zeros_like(grad_alphan), grad_alphan
+            input >= clip_val, torch.zeros_like(grad_alphan), grad_alphan
         )
         grad_alphan = torch.where(
-            ((input_tensor < clip_val) & (input_tensor > clip_valn)),
+            ((input < clip_val) & (input > clip_valn)),
             (grad_alphan - grad_alphan * ctx.residual),
             grad_alphan,
         )
         grad_alphan = grad_alphan.sum().expand_as(clip_valn)
 
-        return grad_input_tensor, grad_alpha, grad_alphan, None, None, None
+        return grad_input, grad_alpha, grad_alphan, None, None, None
 
 
 class CGPACT2_perChannel_STE(torch.autograd.Function):
     """2-side CGPACT+per weight channel quantization"""
 
     @staticmethod
-    def forward(ctx, input_tensor, clip_val, clip_valn, num_bits, dequantize, inplace):
-        ctx.save_for_backward(input_tensor, clip_val, clip_valn)
+    def forward(ctx, input, clip_val, clip_valn, num_bits, dequantize, inplace):
+        ctx.save_for_backward(input, clip_val, clip_valn)
         if inplace:
-            ctx.mark_dirty(input_tensor)
+            ctx.mark_dirty(input)
         scale, zero_point = asymmetric_linear_quantization_params(
             num_bits,
             clip_valn.data,
@@ -1888,15 +1849,13 @@ class CGPACT2_perChannel_STE(torch.autograd.Function):
         )
         if isinstance(clip_val, torch.Tensor):
             output = torch.where(
-                input_tensor > clip_val,
-                torch.ones_like(input_tensor) * clip_val,
-                input_tensor,
+                input > clip_val, torch.ones_like(input) * clip_val, input
             )
             output = torch.where(
-                output < clip_valn, torch.ones_like(input_tensor) * clip_valn, output
+                output < clip_valn, torch.ones_like(input) * clip_valn, output
             )
         else:
-            output = clamp(input_tensor, clip_valn.data, clip_val.data, inplace)
+            output = clamp(input, clip_valn.data, clip_val.data, inplace)
         output, ctx.residual = linear_quantize_residual(
             output, scale, zero_point, inplace
         )
@@ -1911,38 +1870,34 @@ class CGPACT2_perChannel_STE(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        input_tensor, clip_val, clip_valn = ctx.saved_tensors
-        grad_input_tensor = grad_output.clone()
-        grad_input_tensor = torch.where(
-            input_tensor <= clip_valn,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        input, clip_val, clip_valn = ctx.saved_tensors
+        grad_input = grad_output.clone()
+        grad_input = torch.where(
+            input <= clip_valn, torch.zeros_like(grad_input), grad_input
         )
-        grad_input_tensor = torch.where(
-            input_tensor >= clip_val,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        grad_input = torch.where(
+            input >= clip_val, torch.zeros_like(grad_input), grad_input
         )
 
         grad_alpha = grad_output.clone()
         grad_alpha = torch.where(
-            ((input_tensor < clip_val) & (input_tensor > clip_valn)),
+            ((input < clip_val) & (input > clip_valn)),
             grad_alpha * ctx.residual,
             grad_alpha,
         )
-        grad_alpha = torch.where(input_tensor <= clip_valn, -grad_alpha, grad_alpha)
+        grad_alpha = torch.where(input <= clip_valn, -grad_alpha, grad_alpha)
         grad_alpha = grad_alpha.sum((0, 2, 3), keepdim=True)
 
         grad_alphan = grad_output.clone()
-        grad_alphan = torch.where(input_tensor >= clip_val, -grad_alphan, grad_alphan)
+        grad_alphan = torch.where(input >= clip_val, -grad_alphan, grad_alphan)
         grad_alphan = torch.where(
-            ((input_tensor < clip_val) & (input_tensor > clip_valn)),
+            ((input < clip_val) & (input > clip_valn)),
             -grad_alphan * ctx.residual,
             grad_alphan,
         )
         grad_alphan = grad_alphan.sum((0, 2, 3), keepdim=True)
         # Straight-through estimator for the scale factor calculation
-        return grad_input_tensor, grad_alpha, grad_alphan, None, None, None
+        return grad_input, grad_alpha, grad_alphan, None, None, None
 
 
 # Double-sided PACT+, simplified version, no LUT support
@@ -1950,7 +1905,7 @@ class PACTplus2STE(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
-        input_tensor,
+        input,
         clip_val,
         clip_valn,
         num_bits,
@@ -1959,37 +1914,27 @@ class PACTplus2STE(torch.autograd.Function):
         intg_zp,
         use_PT_native_Qfunc,
     ):
-        clip_val, clip_valn = (
-            clip_val.to(input_tensor.dtype),
-            clip_valn.to(input_tensor.dtype),
-        )
+        clip_val, clip_valn = clip_val.to(input.dtype), clip_valn.to(input.dtype)
         n_levels = 2**num_bits - 1
-        scale = n_levels / (clip_val - clip_valn)
+        scale, zero_point = asymmetric_linear_quantization_params(
+            num_bits,
+            clip_valn.data,
+            clip_val.data,
+            integral_zero_point=intg_zp,
+            signed=False,
+        )
         stepsize = 1.0 / scale
-        zp = clip_valn * scale
-        # --- TODO, move this to outer loop and use load_state_dict method
-        # (as used by clip_val_asst) to avoid slow-down ---
-        if intg_zp >= 1:  # adjust to preserve 0 in the quantized y
-            # align zero only, no change in stepsize
-            rzp = torch.round(zp)
-            # deltastep = (torch.round(zp - rzp) + rzp) * stepsize - clip_valn
-            zp = rzp
-            if intg_zp == 2:  # align upper bound
-                stepsize = clip_val / (n_levels + zp)
-                clip_valn = (stepsize * zp).to(input_tensor.device)
-            elif intg_zp == 3:  # align lower bound
-                stepsize = clip_valn / zp
-                clip_val = (stepsize * (n_levels + zp)).to(input_tensor.device)
 
-        ctx.save_for_backward(input_tensor, clip_val, clip_valn)
+        ctx.save_for_backward(input, clip_val, clip_valn)
         if inplace:
-            ctx.mark_dirty(input_tensor)
+            ctx.mark_dirty(input)
         ctx.n_levels = n_levels
         ctx.n_bits = num_bits
         ctx.stepsize = stepsize
 
-        if torch.is_nonzero(zp):  # was torch.any(zp != 0):
-            # given the zp formula we use above, zp should always be non-zeros...
+        if torch.any(
+            zero_point != 0
+        ):  # given the zero_point formula we use above, zero_point should always be non-zeros...
             quant_min, quant_max = 0, 2**num_bits - 1  # eg (0, 255) or (0,15)
             int_dtype = torch.uint8
         else:
@@ -2016,90 +1961,78 @@ class PACTplus2STE(torch.autograd.Function):
 
             n_levels = 2**num_bits - 1
             scale = (clip_val - clip_valn) / n_levels
-            zp = torch.round(-clip_valn / scale).to(torch.int)
-            signed = not torch.is_nonzero(zp)  # was (zp==0).item()
-            qint_dtype = qint_dtype_dict.get((num_bits, signed))
+            zero_point = torch.round(-clip_valn / scale).to(torch.int)
+            signed = (zero_point == 0).item()
+            num_bits_int = (
+                num_bits.item() if isinstance(num_bits, torch.Tensor) else num_bits
+            )
+            qint_dtype = qint_dtype_dict.get((num_bits_int, signed))
             int_dtype = int_dtype_dict.get(qint_dtype)
-            input_tensor_dtype = (
-                input_tensor.dtype
+            input_dtype = (
+                input.dtype
             )  # fake_quantize_per_xxx doesn't support fp16 out of the box
 
             if dequantize:
                 out = torch.fake_quantize_per_tensor_affine(
-                    input_tensor.float(), scale.float(), zp, quant_min, quant_max
+                    input.float(), scale.float(), zero_point, quant_min, quant_max
                 )
-                out = out.to(input_tensor_dtype)
+                return out.to(input_dtype)
             else:
                 # Clamp to [quant_min, quant_max] in case we are storing quint4 into a uint8 tensor
                 out = (
                     torch.quantize_per_tensor(
-                        input_tensor, scale.float(), zp, qint_dtype
+                        input, scale.float(), zero_point, qint_dtype
                     )
                     .int_repr()
                     .clamp(quant_min, quant_max)
                 )
-            return out  # do not cast back to input_tensor_dtype!
+                return out  # do not cast back to input_dtype!
 
         if isinstance(clip_val, torch.Tensor):
-            input_tensor = torch.minimum(input_tensor, clip_val)
-            input_tensor = torch.maximum(input_tensor, clip_valn)
-            output = input_tensor
+            input = torch.minimum(input, clip_val)
+            input = torch.maximum(input, clip_valn)
+            output = input
         else:
-            output = clamp(input_tensor, clip_valn.data, clip_val.data, inplace)
+            output = clamp(input, clip_valn.data, clip_val.data, inplace)
 
-        output = torch.round(output / stepsize.to(output.device) - zp.to(output.device))
+        output = linear_quantize(output, scale, zero_point, inplace)
         if dequantize:
-            output = (output + zp.to(output.device)) * stepsize.to(output.device)
+            output = linear_dequantize(output, scale, zero_point, inplace)
         else:
             output = output.clamp(quant_min, quant_max).to(int_dtype)
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
-        input_tensor, clip_val, clip_valn = ctx.saved_tensors
+        input, clip_val, clip_valn = ctx.saved_tensors
         n_levels = ctx.n_levels
         stepsize = ctx.stepsize
-        z = (input_tensor - clip_valn) / stepsize
-        delz = (z - torch.round(z)) / n_levels
+        z = (input - clip_valn) * stepsize
+        delz = (z - torch.round(z)) * n_levels
 
-        grad_input_tensor = grad_output.clone()
-        grad_input_tensor = torch.where(
-            input_tensor <= clip_valn,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        grad_input = grad_output.clone()
+        grad_input = torch.where(
+            input <= clip_valn, torch.zeros_like(grad_input), grad_input
         )
-        grad_input_tensor = torch.where(
-            input_tensor >= clip_val,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        grad_input = torch.where(
+            input >= clip_val, torch.zeros_like(grad_input), grad_input
         )
 
         grad_alpha = -grad_output.clone() * delz
         grad_alphan = -grad_alpha
         grad_alpha = torch.where(
-            input_tensor <= clip_valn, torch.zeros_like(grad_alpha), grad_alpha
+            input <= clip_valn, torch.zeros_like(grad_alpha), grad_alpha
         )
-        grad_alpha = torch.where(input_tensor >= clip_val, grad_output, grad_alpha)
+        grad_alpha = torch.where(input >= clip_val, grad_output, grad_alpha)
         grad_alphan = torch.where(
-            input_tensor >= clip_val, torch.zeros_like(grad_alpha), grad_alphan
+            input >= clip_val, torch.zeros_like(grad_alpha), grad_alphan
         )
-        grad_alphan = torch.where(input_tensor <= clip_valn, grad_output, grad_alphan)
+        grad_alphan = torch.where(input <= clip_valn, grad_output, grad_alphan)
 
         grad_alpha = grad_alpha.sum().expand_as(clip_val)
         grad_alphan = grad_alphan.sum().expand_as(clip_valn)
 
-        # Straight-through estimator for the scale factor calculation
-        return (
-            grad_input_tensor,
-            grad_alpha,
-            grad_alphan,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        return grad_input, grad_alpha, grad_alphan, None, None, None, None, None, None
 
 
 ####################### Fixed clip quantizer ###################################
@@ -2108,7 +2041,7 @@ class PACTplus2STE(torch.autograd.Function):
 class QFixSymmetric(nn.Module):
     def __init__(self, num_bits, init_clip_val=None, align_zero=False):
         """Quantization class with 2-sided FIXED, SYMMETRIC clip values (no gradient on clip)"""
-        super().__init__()
+        super(QFixSymmetric, self).__init__()
         self.num_bits = num_bits
         self.align_zero = align_zero
         if self.align_zero:
@@ -2117,35 +2050,31 @@ class QFixSymmetric(nn.Module):
             self.quantizer = QFixSymmetricSTE
         self.clip_val = nn.Parameter(torch.Tensor([init_clip_val]), requires_grad=False)
 
-    def forward(self, input_tensor):
-        input_tensor = self.quantizer.apply(input_tensor, self.num_bits, self.clip_val)
-        return input_tensor
+    def forward(self, input):
+        input = self.quantizer.apply(input, self.num_bits, self.clip_val)
+        return input
 
     def __repr__(self):
         return (
-            f"{self.__class__.__name__}(num_bits={self.num_bits},"
+            f"{self.__class__.__name__}(num_bits={self.num_bits}, "
             f"clip_val={self.clip_val[0]:.2f}, quantizer={self.quantizer})"
         )
 
 
 class QFixSymmetricSTE(torch.autograd.Function):
-    """Linear quantization with Straight Through Estimator on input_tensor tensor
+    """Linear quantization with Straight Through Estimator on input tensor
     Clips are fixed and symmetric, without gradient
     """
 
     @staticmethod
-    def forward(ctx, input_tensor, num_bits, clip_val):
+    def forward(ctx, input, num_bits, clip_val):
         n_gaps = 2**num_bits - 1
         scale = n_gaps / (2 * clip_val)
         zero_point = -clip_val * scale
 
-        output = torch.where(
-            input_tensor > clip_val,
-            torch.ones_like(input_tensor) * clip_val,
-            input_tensor,
-        )
+        output = torch.where(input > clip_val, torch.ones_like(input) * clip_val, input)
         output_clipped = torch.where(
-            output < -clip_val, -torch.ones_like(input_tensor) * clip_val, output
+            output < -clip_val, -torch.ones_like(input) * clip_val, output
         )
 
         # quantize and dequantize
@@ -2162,24 +2091,20 @@ class QFixSymmetricSTE(torch.autograd.Function):
 
 
 class QFixSymmetricZeroSTE(torch.autograd.Function):
-    """Linear quantization with Straight Through Estimator on input_tensor tensor
+    """Linear quantization with Straight Through Estimator on input tensor
     Clips are fixed and symmetric, without gradient
     Zero is aligned by using one less level
     """
 
     @staticmethod
-    def forward(ctx, input_tensor, num_bits, clip_val):
+    def forward(ctx, input, num_bits, clip_val):
         n_gaps = 2**num_bits - 2  # drop one of the available levels
         scale = n_gaps / (2 * clip_val)
         zero_point = -clip_val * scale
 
-        output = torch.where(
-            input_tensor > clip_val,
-            torch.ones_like(input_tensor) * clip_val,
-            input_tensor,
-        )
+        output = torch.where(input > clip_val, torch.ones_like(input) * clip_val, input)
         output_clipped = torch.where(
-            output < -clip_val, -torch.ones_like(input_tensor) * clip_val, output
+            output < -clip_val, -torch.ones_like(input) * clip_val, output
         )
 
         # quantize and dequantize
@@ -2199,7 +2124,7 @@ class QFixSymmetricZeroSTE(torch.autograd.Function):
 class LSQQuantization(nn.Module):
     def __init__(self, num_bits, init_clip_val, dequantize=True, inplace=False):
         """1-sided LSQ quantization module"""
-        super().__init__()
+        super(LSQQuantization, self).__init__()
         self.num_bits = num_bits
         if isinstance(init_clip_val, torch.Tensor):
             self.clip_val = nn.Parameter(init_clip_val)
@@ -2207,18 +2132,21 @@ class LSQQuantization(nn.Module):
             self.clip_val = nn.Parameter(torch.Tensor([init_clip_val]))
         self.dequantize = dequantize
         self.inplace = inplace
+        self.set_quantizer()
 
-    def forward(self, input_tensor):
-        input_tensor = LSQQuantizationSTE.apply(
-            input_tensor, self.clip_val, self.num_bits, self.dequantize, self.inplace
+    def set_quantizer(self):
+        self.quantizer = LSQQuantizationSTE
+
+    def forward(self, input):
+        input = self.quantizer.apply(
+            input, self.clip_val, self.num_bits, self.dequantize, self.inplace
         )
-        return input_tensor
+        return input
 
     def __repr__(self):
         inplace_str = ", inplace" if self.inplace else ""
-        return (
-            f"{self.__class__.__name__}(num_bits={self.num_bits}, clip_val={self.clip_val[0]}, "
-            f"cggrad={inplace_str})"
+        return "{0}(num_bits={1}, clip_val={2}, cggrad={3})".format(
+            self.__class__.__name__, self.num_bits, self.clip_val[0], inplace_str
         )
 
 
@@ -2226,24 +2154,22 @@ class LSQQuantizationSTE(torch.autograd.Function):
     """1-sided LSQ quantization STE"""
 
     @staticmethod
-    def forward(ctx, input_tensor, clip_val, num_bits, dequantize, inplace):
+    def forward(ctx, input, clip_val, num_bits, dequantize, inplace):
         if inplace:
-            ctx.mark_dirty(input_tensor)
+            ctx.mark_dirty(input)
         scale, zero_point = asymmetric_linear_quantization_params(
             num_bits, 0, clip_val.data, signed=False
         )
         if isinstance(clip_val, torch.Tensor):
-            if input_tensor.min() < 0:
+            if input.min() < 0:
                 raise ValueError(
-                    "FMS: input_tensor to ClippedLinearQuantization should be non-negative."
+                    "input to ClippedLinearQuantization should be non-negative."
                 )
             output = torch.where(
-                input_tensor > clip_val,
-                torch.ones_like(input_tensor) * clip_val,
-                input_tensor,
+                input > clip_val, torch.ones_like(input) * clip_val, input
             )
         else:
-            output = clamp(input_tensor, 0, clip_val.data, inplace)
+            output = clamp(input, 0, clip_val.data, inplace)
         output, residual = linear_quantize_LSQresidual(
             output, scale, zero_point, inplace
         )
@@ -2253,86 +2179,89 @@ class LSQQuantizationSTE(torch.autograd.Function):
 
         if dequantize:
             output = linear_dequantize(output, scale, zero_point, inplace)
+        else:
+            output = output.to(torch.uint8)
 
-        ctx.save_for_backward(input_tensor, clip_val, residual)
+        ctx.save_for_backward(input, clip_val, residual)
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
-        input_tensor, clip_val, residual = ctx.saved_tensors
-        grad_input_tensor = grad_output.clone()
-        grad_input_tensor = torch.where(
-            input_tensor < 0, torch.zeros_like(grad_input_tensor), grad_input_tensor
-        )
-        grad_input_tensor = torch.where(
-            input_tensor > clip_val,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        input, clip_val, residual = ctx.saved_tensors
+        grad_input = grad_output.clone()
+        grad_input = torch.where(input < 0, torch.zeros_like(grad_input), grad_input)
+        grad_input = torch.where(
+            input > clip_val, torch.zeros_like(grad_input), grad_input
         )
 
         grad_alpha = grad_output.clone()
-        grad_alpha = torch.where(
-            input_tensor < clip_val, grad_alpha * residual, grad_alpha
-        )
+        grad_alpha = torch.where(input < clip_val, grad_alpha * residual, grad_alpha)
         grad_alpha = grad_alpha.sum().expand_as(clip_val)
         ndim = float(sum(list(grad_output.shape)))
         grad_scale = math.sqrt(1 / ndim / 3.0)  # 3 is for 2bit, should be n
-        return grad_input_tensor, grad_alpha * grad_scale, None, None, None
+        return grad_input, grad_alpha * grad_scale, None, None, None
 
 
 ########################LSQ+ #############################################
 class LSQPlus(nn.Module):
-    def __init__(
-        self, num_bits, init_clip_vals, init_clip_valb, dequantize=True, inplace=False
-    ):
-        super().__init__()
-        self.init_clip_vals = init_clip_vals
-        self.init_clip_valb = init_clip_valb
-        self.clip_vals = nn.Parameter(torch.tensor(self.init_clip_vals))
-        self.clip_valb = nn.Parameter(torch.tensor(self.init_clip_valb))
-        self.counter = nn.Parameter(torch.zeros_like(self.clip_vals.data))
+    def __init__(self, num_bits, clip_val, clip_valn, dequantize=True, inplace=False):
+        super(LSQPlus, self).__init__()
+        # clip_val, clip_valn are not training paramaters
+        # scale, zero_point are trained instead
+        self.clip_val = clip_val.clone()
+        self.clip_valn = clip_valn.clone()
+        self.scale = nn.Parameter(self.clip_val)
+        self.zero_point = nn.Parameter(self.clip_valn)
+        self.counter = nn.Parameter(torch.zeros_like(self.clip_val))
         self.dequantize = dequantize
         self.inplace = inplace
         self.num_bits = num_bits
 
+        self.set_quantizer()
+
+    def set_quantizer(self):
+        self.quantizer = LSQPlus_func
+
     # NOTE: no dequantize here
-    def forward(self, input_tensor):
+    def forward(self, input):
         with torch.no_grad():
             if self.counter == 0:
-                xmin = input_tensor.min().item()
-                self.clip_vals.data = (
-                    torch.ones_like(self.clip_vals.data)
-                    * (input_tensor.max().item() - xmin)
+                xmin, xmax = input.min(), input.max()
+                # scale = (input.max - input.min) / n_levels
+                self.scale.data = (
+                    torch.ones_like(self.clip_val)
+                    * (xmax - xmin)
                     / (2.0**self.num_bits - 1)
                 )
-                self.clip_valb.data = torch.ones_like(self.clip_valb.data) * (
-                    xmin + 2.0 ** (self.num_bits - 1) * self.clip_vals.data.item()
+                # zero_point = input.min + 2**(b-1) * scale and round
+                self.zero_point.data = torch.ones_like(self.zero_point) * (
+                    xmin + 2 ** (self.num_bits - 1) * self.scale
                 )
+                self.zero_point.data = self.zero_point.data.round()
                 self.counter += 1
-        input_tensor = LSQPlus_func.apply(
-            input_tensor,
-            self.clip_vals,
-            self.clip_valb,
+
+        input = self.quantizer.apply(
+            input,
+            self.scale,
+            self.zero_point,
             self.num_bits,
             self.dequantize,
             self.inplace,
         )
-        return input_tensor
+        return input
 
 
 class LSQPlus_func(torch.autograd.Function):
     """2-side LSQ+ from CVPR workshop paper"""
 
     @staticmethod
-    def forward(
-        ctx, input_tensor, clip_vals, clip_valb, num_bits, _dequantize, _inplace
-    ):
-        ctx.save_for_backward(input_tensor, clip_vals.clone(), clip_valb.clone())
-        clip_val = 2.0 ** (num_bits - 1) - 1
-        clip_valn = -(2.0 ** (num_bits - 1))
+    def forward(ctx, input, scale, zero_point, num_bits, dequantize, inplace):
+        ctx.save_for_backward(input, scale.clone(), zero_point.clone())
+        n_half = 2 ** (num_bits - 1)
+        clip_valn, clip_val = -n_half, n_half - 1  # [-128,127], [-8,7]
 
-        output = (input_tensor - clip_valb) / clip_vals
-        # output = output.clamp(clip_valn, clip_val)
+        # Quantize + clamp to quantized clip_vals + round
+        output = (input - zero_point) / scale
         output = torch.where(
             output > clip_val, torch.ones_like(output) * clip_val, output
         )
@@ -2343,49 +2272,49 @@ class LSQPlus_func(torch.autograd.Function):
         ctx.residual = rounded - output
 
         with torch.no_grad():
-            ctx.clip_val = clip_val * clip_vals + clip_valb
-            ctx.clip_valn = clip_valn * clip_vals + clip_valb
+            ctx.clip_val = clip_val * scale + zero_point
+            ctx.clip_valn = clip_valn * scale + zero_point
             ctx.num_bits = num_bits
 
-        output = rounded * clip_vals + clip_valb
+        if dequantize:
+            output = linear_dequantize(rounded, scale, zero_point, inplace)
+        else:
+            output = rounded.to(torch.int8)
+
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
-        input_tensor, clip_vals, clip_valb = ctx.saved_tensors
+        input, clip_vals, clip_valb = ctx.saved_tensors
         p = 2.0 ** (ctx.num_bits - 1) - 1
         n = -(2.0 ** (ctx.num_bits - 1))
-        grad_input_tensor = grad_output.clone()
-        grad_input_tensor = torch.where(
-            input_tensor <= ctx.clip_valn,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        grad_input = grad_output.clone()
+        grad_input = torch.where(
+            input <= ctx.clip_valn, torch.zeros_like(grad_input), grad_input
         )
-        grad_input_tensor = torch.where(
-            input_tensor >= ctx.clip_val,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        grad_input = torch.where(
+            input >= ctx.clip_val, torch.zeros_like(grad_input), grad_input
         )
 
         grad_s = grad_output.clone()
         grad_s = torch.where(
-            ((input_tensor < ctx.clip_val) & (input_tensor > ctx.clip_valn)),
+            ((input < ctx.clip_val) & (input > ctx.clip_valn)),
             grad_s * ctx.residual,
             grad_s,
         )
-        grad_s = torch.where(input_tensor <= ctx.clip_valn, n * grad_s, grad_s)
-        grad_s = torch.where(input_tensor >= ctx.clip_val, p * grad_s, grad_s)
+        grad_s = torch.where(input <= ctx.clip_valn, n * grad_s, grad_s)
+        grad_s = torch.where(input >= ctx.clip_val, p * grad_s, grad_s)
         grad_s = grad_s.sum().expand_as(clip_vals)
 
         grad_beta = grad_output.clone()
         grad_beta = torch.where(
-            ((input_tensor < ctx.clip_val) & (input_tensor > ctx.clip_valn)),
+            ((input < ctx.clip_val) & (input > ctx.clip_valn)),
             torch.zeros_like(grad_beta),
             grad_beta,
         )
         grad_beta = grad_beta.sum().expand_as(clip_valb)
 
-        return grad_input_tensor, grad_s, grad_beta, None, None, None
+        return grad_input, grad_s, grad_beta, None, None, None
 
 
 ###################silu quantization############
@@ -2405,6 +2334,234 @@ class QSILU(nn.Module):
         """For silu activations
         saturate the negative values to -0.28746
         """
+        super(QSILU, self).__init__()
+        self.num_bits = num_bits
+
+        if isinstance(init_clip_val, torch.Tensor) and isinstance(
+            init_clip_valn, torch.Tensor
+        ):
+            self.clip_val = nn.Parameter(init_clip_val)
+            self.clip_valn_cont = init_clip_valn
+        elif not isinstance(init_clip_val, torch.Tensor) and not isinstance(
+            init_clip_valn, torch.Tensor
+        ):
+            self.clip_val = nn.Parameter(torch.Tensor([init_clip_val]))
+            self.clip_valn_const = torch.Tensor([init_clip_valn])
+        else:
+            raise ValueError(
+                "init_clip_val and init_clip_valn in LearnedTwosidedClippedLinearQuantization "
+                "should be the same instance type."
+            )
+        self.dequantize = dequantize
+        self.inplace = inplace
+        self.cggrad = cggrad
+        self.grad_scale = grad_scale
+        if self.cggrad:
+            self.quantizer = CGSiluSTE
+        elif self.grad_scale:
+            self.quantizer = CGsiluGradScaleSTE
+        else:
+            self.quantizer = SiluSTE
+
+    def forward(self, input):
+        input = self.quantizer.apply(
+            input,
+            self.clip_val,
+            self.clip_valn_const,
+            self.num_bits,
+            self.dequantize,
+            self.inplace,
+        )
+        return input
+
+    def __repr__(self):
+        clip_str = ", pos-clip={}, neg-clip={}, cggrad={}".format(
+            self.clip_val[0], self.clip_valn_const[0], self.cggrad
+        )
+        inplace_str = ", inplace" if self.inplace else ""
+        return "{0}(num_bits={1}{2}{3})".format(
+            self.__class__.__name__, self.num_bits, clip_str, inplace_str
+        )
+
+
+class SiluSTE(torch.autograd.Function):
+    """two-sided original pact quantization for activation"""
+
+    @staticmethod
+    def forward(ctx, input, clip_val, clip_valn, num_bits, dequantize, inplace):
+        if clip_val.device != clip_valn.device:
+            clip_valn = clip_valn.to(clip_val.device)
+        ctx.save_for_backward(input, clip_val, clip_valn)
+        if inplace:
+            ctx.mark_dirty(input)
+        scale, zero_point = asymmetric_linear_quantization_params(
+            num_bits,
+            clip_valn.data,
+            clip_val.data,
+            integral_zero_point=False,
+            signed=False,
+        )
+        if isinstance(clip_val, torch.Tensor):
+            output = torch.where(
+                input > clip_val, torch.ones_like(input) * clip_val, input
+            )
+            output = torch.where(
+                output < clip_valn, torch.ones_like(input) * clip_valn, output
+            )
+        else:
+            output = clamp(input, clip_valn.data, clip_val.data, inplace)
+        output = linear_quantize(output, scale, zero_point, inplace)
+        if dequantize:
+            output = linear_dequantize(output, scale, zero_point, inplace)
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        input, clip_val, clip_valn = ctx.saved_tensors
+        grad_input = grad_output.clone()
+        grad_input = torch.where(
+            input <= clip_valn, torch.zeros_like(grad_input), grad_input
+        )
+        grad_input = torch.where(
+            input >= clip_val, torch.zeros_like(grad_input), grad_input
+        )
+
+        grad_alpha = grad_output.clone()
+        grad_alpha = torch.where(
+            input < clip_val, torch.zeros_like(grad_alpha), grad_alpha
+        )
+        grad_alpha = grad_alpha.sum().expand_as(clip_val)
+        return grad_input, grad_alpha, None, None, None, None
+
+
+class CGSiluSTE(torch.autograd.Function):
+    """2-sided CGsilu"""
+
+    @staticmethod
+    def forward(ctx, input, clip_val, clip_valn, num_bits, dequantize, inplace):
+        ctx.save_for_backward(input, clip_val, clip_valn)
+        if inplace:
+            ctx.mark_dirty(input)
+        scale, zero_point = asymmetric_linear_quantization_params(
+            num_bits,
+            clip_valn.data,
+            clip_val.data,
+            integral_zero_point=False,
+            signed=False,
+        )
+        if isinstance(clip_val, torch.Tensor):
+            output = torch.where(
+                input > clip_val, torch.ones_like(input) * clip_val, input
+            )
+            output = torch.where(
+                output < clip_valn, torch.ones_like(input) * clip_valn, output
+            )
+        else:
+            output = clamp(input, clip_valn.data, clip_val.data, inplace)
+        output, ctx.residual = linear_quantize_residual(
+            output, scale, zero_point, inplace
+        )
+        with torch.no_grad():
+            n = (2**num_bits - 1) / 2.0
+            ctx.residual.div_(n).sub_(1.0)
+
+        if dequantize:
+            output = linear_dequantize(output, scale, zero_point, inplace)
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        input, clip_val, clip_valn = ctx.saved_tensors
+        grad_input = grad_output.clone()
+        grad_input = torch.where(
+            input <= clip_valn, torch.zeros_like(grad_input), grad_input
+        )
+        grad_input = torch.where(
+            input >= clip_val, torch.zeros_like(grad_input), grad_input
+        )
+
+        grad_alpha = grad_output.clone()
+        grad_alpha = torch.where(
+            ((input < clip_val) & (input > clip_valn)),
+            grad_alpha * ctx.residual,
+            grad_alpha,
+        )
+        grad_alpha = torch.where(input <= clip_valn, -grad_alpha, grad_alpha)
+        grad_alpha = grad_alpha.sum().expand_as(clip_val)
+        return grad_input, grad_alpha, None, None, None, None
+
+
+class CGsiluGradScaleSTE(torch.autograd.Function):
+    """2-sided silu+ scale alpha gradients"""
+
+    @staticmethod
+    def forward(ctx, input, clip_val, clip_valn, num_bits: int, dequantize, inplace):
+        ctx.save_for_backward(input, clip_val, clip_valn)
+        if inplace:
+            ctx.mark_dirty(input)
+        scale, zero_point = asymmetric_linear_quantization_params(
+            num_bits,
+            clip_valn.data,
+            clip_val.data,
+            integral_zero_point=False,
+            signed=False,
+        )
+        if isinstance(clip_val, torch.Tensor):
+            output = torch.where(
+                input > clip_val, torch.ones_like(input) * clip_val, input
+            )
+            output = torch.where(
+                output < clip_valn, torch.ones_like(input) * clip_valn, output
+            )
+        else:
+            output = clamp(input, clip_valn.data, clip_val.data, inplace)
+        output, ctx.residual = linear_quantize_residual(
+            output, scale, zero_point, inplace
+        )
+        with torch.no_grad():
+            n = (2**num_bits - 1) / 2.0
+            ctx.residual.div_(n).sub_(1.0)
+
+        if dequantize:
+            output = linear_dequantize(output, scale, zero_point, inplace)
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        input, clip_val, clip_valn = ctx.saved_tensors
+        grad_input = grad_output.clone()
+        grad_input = torch.where(
+            input <= clip_valn, torch.zeros_like(grad_input), grad_input
+        )
+        grad_input = torch.where(
+            input >= clip_val, torch.zeros_like(grad_input), grad_input
+        )
+        grad_alpha = grad_output.clone()
+        grad_alpha = torch.where(
+            ((input < clip_val) & (input > clip_valn)),
+            grad_alpha * ctx.residual,
+            grad_alpha,
+        )
+        grad_alpha = torch.where(input <= clip_valn, -grad_alpha, grad_alpha)
+        grad_alpha = grad_alpha.sum().expand_as(clip_val)
+
+        ndim = float(sum(list(grad_output.shape)))
+        grad_scale = math.sqrt(1 / ndim / 3.0)
+        return grad_input, grad_alpha * grad_scale, None, None, None, None
+
+
+class SiluQuantization(nn.Module):
+    def __init__(
+        self,
+        num_bits: int,
+        init_clip_valn,
+        init_clip_val,
+        dequantize=True,
+        inplace=False,
+        cggrad=False,
+        grad_scale=False,
+    ):
+        """two-sided original PACT"""
         super().__init__()
         self.num_bits = num_bits
 
@@ -2420,38 +2577,53 @@ class QSILU(nn.Module):
             self.clip_valn_const = torch.Tensor([init_clip_valn])
         else:
             raise ValueError(
-                "FMS: init_clip_val and init_clip_valn in LearnedTwosidedClippedLinearQuantization "
+                "init_clip_val and init_clip_valn in LearnedTwosidedClippedLinearQuantization "
                 "should be the same instance type."
             )
         self.dequantize = dequantize
         self.inplace = inplace
         self.cggrad = cggrad
         self.grad_scale = grad_scale
-        if self.cggrad:
-            self.quantizer = CGSiluSTE
-        elif self.grad_scale:
-            self.quantizer = CGsiluGradScaleSTE
-        else:
-            self.quantizer = SiluSTE
 
-    def forward(self, input_tensor):
-        input_tensor = self.quantizer.apply(
-            input_tensor,
-            self.clip_val,
-            self.clip_valn_const,
-            self.num_bits,
-            self.dequantize,
-            self.inplace,
-        )
-        return input_tensor
+    def forward(self, input):
+        if self.cggrad:
+            if self.grad_scale:
+                input = CGsiluGradScaleSTE.apply(
+                    input,
+                    self.clip_val,
+                    self.clip_valn_const,
+                    self.num_bits,
+                    self.dequantize,
+                    self.inplace,
+                )
+            else:
+                input = CGSiluSTE.apply(
+                    input,
+                    self.clip_val,
+                    self.clip_valn_const,
+                    self.num_bits,
+                    self.dequantize,
+                    self.inplace,
+                )
+        else:
+            input = SiluSTE.apply(
+                input,
+                self.clip_val,
+                self.clip_valn_const,
+                self.num_bits,
+                self.dequantize,
+                self.inplace,
+            )
+        return input
 
     def __repr__(self):
-        clip_str = (
-            f", pos-clip={self.clip_val[0]}, neg-clip={self.clip_valn_const[0]}, "
-            f"cggrad={self.cggrad}"
+        clip_str = ", pos-clip={}, neg-clip={}, cggrad={}".format(
+            self.clip_val[0], self.clip_valn_const[0], self.cggrad
         )
         inplace_str = ", inplace" if self.inplace else ""
-        return f"{self.__class__.__name__}(num_bits={self.num_bits}{clip_str}{inplace_str})"
+        return "{0}(num_bits={1}{2}{3})".format(
+            self.__class__.__name__, self.num_bits, clip_str, inplace_str
+        )
 
 
 ##############Dorefa############
@@ -2504,10 +2676,10 @@ def symmetric_linear_quantization_params(num_bits, saturation_val):
     # If float values are all 0, we just want the quantized values to be 0 as well.
     # So overriding the saturation value to 'n', so the scale becomes 1
     sat_val[sat_val == 0] = n
-    scale = n / sat_val
+    scale = sat_val / n
     zero_point = torch.zeros_like(scale)
     if is_scalar:
-        # If input_tensor was scalar, return scalars
+        # If input was scalar, return scalars
         return scale.item(), zero_point.item()
     return scale, zero_point
 
@@ -2525,6 +2697,8 @@ def asymmetric_linear_quantization_params(
         elif scalar_min and not scalar_max:
             sat_min = sat_min.to(sat_max.device)
 
+        # n = 2 ** num_bits - 1 if not integral_zero_point else 2 ** num_bits - 2
+        # # <-- zero alignment also uses one less level
         n = 2**num_bits - 1
         # Make sure 0 is in the range
         sat_min = torch.min(sat_min, torch.zeros_like(sat_min))
@@ -2536,8 +2710,8 @@ def asymmetric_linear_quantization_params(
         # So overriding the saturation value to 'n', so the scale becomes 1
         diff[diff == 0] = n
 
-        scale = n / diff
-        zero_point = scale * sat_min
+        scale = diff / n
+        zero_point = sat_min / scale
         if integral_zero_point:
             zero_point = zero_point.round()
         if signed:
@@ -2547,134 +2721,117 @@ def asymmetric_linear_quantization_params(
         return scale, zero_point
 
 
-def clamp(input_tensor: torch.Tensor, clamp_min, clamp_max, inplace=False):
+def clamp(input: torch.Tensor, min, max, inplace=False):
     """
     Returns:
         Clamped Torch Tensor.
     """
     if inplace:
-        input_tensor.clamp_(clamp_min, clamp_max)
-        return input_tensor
-    return torch.clamp(input_tensor, clamp_min, clamp_max)
+        input.clamp_(min, max)
+        return input
+    return torch.clamp(input, min, max)
 
 
-def linear_quantize(input_tensor, scale, zero_point, inplace=False):
+def linear_quantize(input, scale, zero_point, inplace=False):
     """
-    Linearly discretize input_tensor (Tensor or scalar)
+    Linearly discretize input (Tensor or scalar)
 
     NOTE for PyTorch-native equivalency: because of rounding, the following
     computations do NOT produce identical outputs in all scenarios
     OPTION 1:
-        inv_scale = 1 / scale.to(input_tensor.device)
-        return torch.round(input_tensor / inv_scale) - zero_point.to(input_tensor.device)
+        inv_scale = 1 / scale.to(input.device)
+        return torch.round(input / inv_scale) - zero_point.to(input.device)
     OPTION 2:
-        return torch.round(input_tensor * scale.to(input_tensor.device)) -
-            zero_point.to(input_tensor.device)
+        return torch.round(input * scale.to(input.device)) - zero_point.to(input.device)
     OPTION 3 [in use]:
-        return torch.round(input_tensor * scale.to(input_tensor.device) -
-            zero_point.to(input_tensor.device))
+        return torch.round(input * scale.to(input.device) - zero_point.to(input.device))
     """
     if inplace:
-        input_tensor.mul_(scale).sub_(zero_point).round_()
-        return input_tensor
+        input.div_(scale).sub_(zero_point).round_()
+        return input
     if isinstance(scale, torch.Tensor):
-        return torch.round(
-            scale.to(input_tensor.device) * input_tensor
-            - zero_point.to(input_tensor.device)
-        )
-    return torch.round(scale * input_tensor - zero_point)
-
-
-def linear_quantize_residual(input_tensor, scale, zero_point, _inplace=False):
-    if isinstance(scale, torch.Tensor):
-        unrounded = scale.to(input_tensor.device) * input_tensor - zero_point.to(
-            input_tensor.device
-        )
+        return torch.round(input / scale.to(input.device) - zero_point.to(input.device))
     else:
-        unrounded = scale * input_tensor - zero_point
+        return torch.round(input / scale - zero_point)
+
+
+def linear_quantize_residual(input, scale, zero_point, inplace=False):
+    if isinstance(scale, torch.Tensor):
+        unrounded = input / scale.to(input.device) - zero_point.to(input.device)
+    else:
+        unrounded = input / scale - zero_point
     rounded = torch.round(unrounded)
     with torch.no_grad():
         residual = torch.round(unrounded)
     return rounded, residual
 
 
-def linear_quantize_LSQresidual(input_tensor, scale, zero_point, _inplace=False):
+def linear_quantize_LSQresidual(input, scale, zero_point, inplace=False):
     if isinstance(scale, torch.Tensor):
-        unrounded = scale.to(input_tensor.device) * input_tensor - zero_point.to(
-            input_tensor.device
-        )
+        unrounded = input / scale.to(input.device) - zero_point.to(input.device)
     else:
-        unrounded = scale * input_tensor - zero_point
+        unrounded = input / scale - zero_point
     rounded = torch.round(unrounded)
     with torch.no_grad():
         residual = rounded - unrounded
     return rounded, residual
 
 
-# TODO: This function is not used anywhere. To be removed.
-def linear_quantize_clamp(
-    input_tensor, scale, zero_point, clamp_min, clamp_max, inplace=False
-):
-    output = linear_quantize(input_tensor, scale, zero_point, inplace)
-    return clamp(output, clamp_min, clamp_max, inplace)
-
-
-def linear_dequantize(input_tensor, scale, zero_point, inplace=False):
+def linear_dequantize(input, scale, zero_point, inplace=False):
     """
     TODO: Summarize
     """
     if inplace:
-        input_tensor.add_(zero_point).div_(scale)
-        return input_tensor
+        input.add_(zero_point).mul_(scale)
+        return input
     if isinstance(scale, torch.Tensor):
-        return (input_tensor + zero_point.to(input_tensor.device)) / scale.to(
-            input_tensor.device
+        return (input + zero_point.to(input.device)) * scale.to(
+            input.device
         )  # HACK for PACT
-    return (input_tensor + zero_point) / scale
+    else:
+        return (input + zero_point) * scale
 
 
-# this _zp used to do [-8, +8] then saturate +8 to +7 so that the final is [-8,7]
-def linear_quantize_zp(input_tensor, scale, zero_point, num_bits, inplace=False):
+def linear_quantize_zp(input, scale, zero_point, num_bits, inplace=False):
     """
     TODO: Summarize
+    This _zp used to do [-8, +8] then saturate +8 to +7 so that the final is [-8,7]
     """
     Qp = 2 ** (num_bits - 1) - 1
     if inplace:
-        input_tensor.mul_(scale).sub_(zero_point).round_()
-        return input_tensor
+        input.div_(scale).sub_(zero_point).round_()
+        return input
     if isinstance(scale, torch.Tensor):
         out = torch.round(
-            scale.to(input_tensor.device) * input_tensor
-            - zero_point.to(input_tensor.device)
+            input / scale.to(input.device) - zero_point.to(input.device)
         )  # HACK for PACT
         out = torch.where(out > Qp, torch.ones_like(out) * Qp, out)
         return out
+    else:
+        out = torch.round(input / scale - zero_point)
+        out = torch.where(out > Qp, torch.ones_like(out) * Qp, out)
+        return out
 
-    out = torch.round(scale * input_tensor - zero_point)
-    out = torch.where(out > Qp, torch.ones_like(out) * Qp, out)
-    return out
 
-
-def linear_dequantize_zp(input_tensor, scale, zero_point, inplace=False):
+def linear_dequantize_zp(input, scale, zero_point, inplace=False):
     """
     TODO: Summarize
     """
     if inplace:
-        input_tensor.add_(zero_point).div_(scale)
-        return input_tensor
+        input.add_(zero_point).mul_(scale)
+        return input
     if isinstance(scale, torch.Tensor):
-        return (input_tensor + zero_point.to(input_tensor.device)) / scale.to(
-            input_tensor.device
-        )  # HACK for PACT
-    return (input_tensor + zero_point) / scale
+        return (input + zero_point.to(input.device)) * scale.to(input.device)
+    else:
+        return (input + zero_point) * scale
 
 
 class LinearQuantizeSTE(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input_tensor, scale, zero_point, dequantize, inplace):
+    def forward(ctx, input, scale, zero_point, dequantize, inplace):
         if inplace:
-            ctx.mark_dirty(input_tensor)
-        output = linear_quantize(input_tensor, scale, zero_point, inplace)
+            ctx.mark_dirty(input)
+        output = linear_quantize(input, scale, zero_point, inplace)
         if dequantize:
             output = linear_dequantize(output, scale, zero_point, inplace)
         return output
@@ -2687,10 +2844,10 @@ class LinearQuantizeSTE(torch.autograd.Function):
 
 class ZPLinearQuantizeSTE(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input_tensor, scale, zero_point, num_bits, dequantize, inplace):
+    def forward(ctx, input, scale, zero_point, num_bits, dequantize, inplace):
         if inplace:
-            ctx.mark_dirty(input_tensor)
-        output = linear_quantize_zp(input_tensor, scale, zero_point, num_bits, inplace)
+            ctx.mark_dirty(input)
+        output = linear_quantize_zp(input, scale, zero_point, num_bits, inplace)
         if dequantize:
             output = linear_dequantize_zp(output, scale, zero_point, inplace)
         return output
@@ -2700,279 +2857,19 @@ class ZPLinearQuantizeSTE(torch.autograd.Function):
         return grad_output, None, None, None, None
 
 
-class SiluSTE(torch.autograd.Function):
-    """two-sided original pact quantization for activation"""
-
-    @staticmethod
-    def forward(ctx, input_tensor, clip_val, clip_valn, num_bits, dequantize, inplace):
-        if clip_val.device != clip_valn.device:
-            clip_valn = clip_valn.to(clip_val.device)
-        ctx.save_for_backward(input_tensor, clip_val, clip_valn)
-        if inplace:
-            ctx.mark_dirty(input_tensor)
-        scale, zero_point = asymmetric_linear_quantization_params(
-            num_bits,
-            clip_valn.data,
-            clip_val.data,
-            integral_zero_point=False,
-            signed=False,
-        )
-        if isinstance(clip_val, torch.Tensor):
-            output = torch.where(
-                input_tensor > clip_val,
-                torch.ones_like(input_tensor) * clip_val,
-                input_tensor,
-            )
-            output = torch.where(
-                output < clip_valn, torch.ones_like(input_tensor) * clip_valn, output
-            )
-        else:
-            output = clamp(input_tensor, clip_valn.data, clip_val.data, inplace)
-        output = linear_quantize(output, scale, zero_point, inplace)
-        if dequantize:
-            output = linear_dequantize(output, scale, zero_point, inplace)
-        return output
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        input_tensor, clip_val, clip_valn = ctx.saved_tensors
-        grad_input_tensor = grad_output.clone()
-        grad_input_tensor = torch.where(
-            input_tensor <= clip_valn,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
-        )
-        grad_input_tensor = torch.where(
-            input_tensor >= clip_val,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
-        )
-
-        grad_alpha = grad_output.clone()
-        grad_alpha = torch.where(
-            input_tensor < clip_val, torch.zeros_like(grad_alpha), grad_alpha
-        )
-        grad_alpha = grad_alpha.sum().expand_as(clip_val)
-        return grad_input_tensor, grad_alpha, None, None, None, None
-
-
-class CGSiluSTE(torch.autograd.Function):
-    """2-sided CGsilu"""
-
-    @staticmethod
-    def forward(ctx, input_tensor, clip_val, clip_valn, num_bits, dequantize, inplace):
-        ctx.save_for_backward(input_tensor, clip_val, clip_valn)
-        if inplace:
-            ctx.mark_dirty(input_tensor)
-        scale, zero_point = asymmetric_linear_quantization_params(
-            num_bits,
-            clip_valn.data,
-            clip_val.data,
-            integral_zero_point=False,
-            signed=False,
-        )
-        if isinstance(clip_val, torch.Tensor):
-            output = torch.where(
-                input_tensor > clip_val,
-                torch.ones_like(input_tensor) * clip_val,
-                input_tensor,
-            )
-            output = torch.where(
-                output < clip_valn, torch.ones_like(input_tensor) * clip_valn, output
-            )
-        else:
-            output = clamp(input_tensor, clip_valn.data, clip_val.data, inplace)
-        output, ctx.residual = linear_quantize_residual(
-            output, scale, zero_point, inplace
-        )
-        with torch.no_grad():
-            n = (2**num_bits - 1) / 2.0
-            ctx.residual.div_(n).sub_(1.0)
-
-        if dequantize:
-            output = linear_dequantize(output, scale, zero_point, inplace)
-        return output
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        input_tensor, clip_val, clip_valn = ctx.saved_tensors
-        grad_input_tensor = grad_output.clone()
-        grad_input_tensor = torch.where(
-            input_tensor <= clip_valn,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
-        )
-        grad_input_tensor = torch.where(
-            input_tensor >= clip_val,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
-        )
-
-        grad_alpha = grad_output.clone()
-        grad_alpha = torch.where(
-            ((input_tensor < clip_val) & (input_tensor > clip_valn)),
-            grad_alpha * ctx.residual,
-            grad_alpha,
-        )
-        grad_alpha = torch.where(input_tensor <= clip_valn, -grad_alpha, grad_alpha)
-        grad_alpha = grad_alpha.sum().expand_as(clip_val)
-        return grad_input_tensor, grad_alpha, None, None, None, None
-
-
-class CGsiluGradScaleSTE(torch.autograd.Function):
-    """2-sided silu+ scale alpha gradients"""
-
-    @staticmethod
-    def forward(ctx, input_tensor, clip_val, clip_valn, num_bits, dequantize, inplace):
-        ctx.save_for_backward(input_tensor, clip_val, clip_valn)
-        if inplace:
-            ctx.mark_dirty(input_tensor)
-        scale, zero_point = asymmetric_linear_quantization_params(
-            num_bits,
-            clip_valn.data,
-            clip_val.data,
-            integral_zero_point=False,
-            signed=False,
-        )
-        if isinstance(clip_val, torch.Tensor):
-            output = torch.where(
-                input_tensor > clip_val,
-                torch.ones_like(input_tensor) * clip_val,
-                input_tensor,
-            )
-            output = torch.where(
-                output < clip_valn, torch.ones_like(input_tensor) * clip_valn, output
-            )
-        else:
-            output = clamp(input_tensor, clip_valn.data, clip_val.data, inplace)
-        output, ctx.residual = linear_quantize_residual(
-            output, scale, zero_point, inplace
-        )
-        with torch.no_grad():
-            n = (2**num_bits - 1) / 2.0
-            ctx.residual.div_(n).sub_(1.0)
-
-        if dequantize:
-            output = linear_dequantize(output, scale, zero_point, inplace)
-        return output
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        input_tensor, clip_val, clip_valn = ctx.saved_tensors
-        grad_input_tensor = grad_output.clone()
-        grad_input_tensor = torch.where(
-            input_tensor <= clip_valn,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
-        )
-        grad_input_tensor = torch.where(
-            input_tensor >= clip_val,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
-        )
-        grad_alpha = grad_output.clone()
-        grad_alpha = torch.where(
-            ((input_tensor < clip_val) & (input_tensor > clip_valn)),
-            grad_alpha * ctx.residual,
-            grad_alpha,
-        )
-        grad_alpha = torch.where(input_tensor <= clip_valn, -grad_alpha, grad_alpha)
-        grad_alpha = grad_alpha.sum().expand_as(clip_val)
-
-        ndim = float(sum(list(grad_output.shape)))
-        grad_scale = math.sqrt(1 / ndim / 3.0)
-        return grad_input_tensor, grad_alpha * grad_scale, None, None, None, None
-
-
-class SiluQuantization(nn.Module):
-    def __init__(
-        self,
-        num_bits,
-        init_clip_valn,
-        init_clip_val,
-        dequantize=True,
-        inplace=False,
-        cggrad=False,
-        grad_scale=False,
-    ):
-        """two-sided original PACT"""
-        super().__init__()
-        self.num_bits = num_bits
-
-        if isinstance(init_clip_val, torch.Tensor) and isinstance(
-            init_clip_valn, torch.Tensor
-        ):
-            self.clip_val = nn.Parameter(init_clip_val)
-            self.clip_valn_cont = init_clip_valn
-        elif not isinstance(init_clip_val, torch.Tensor) and not isinstance(
-            init_clip_valn, torch.Tensor
-        ):
-            self.clip_val = nn.Parameter(torch.Tensor([init_clip_val]))
-            self.clip_valn_const = torch.Tensor([init_clip_valn])
-        else:
-            raise ValueError(
-                "FMS: init_clip_val and init_clip_valn in LearnedTwosidedClippedLinearQuantization "
-                "should be the same instance type."
-            )
-        self.dequantize = dequantize
-        self.inplace = inplace
-        self.cggrad = cggrad
-        self.grad_scale = grad_scale
-
-    def forward(self, input_tensor):
-        if self.cggrad:
-            if self.grad_scale:
-                input_tensor = CGsiluGradScaleSTE.apply(
-                    input_tensor,
-                    self.clip_val,
-                    self.clip_valn_const,
-                    self.num_bits,
-                    self.dequantize,
-                    self.inplace,
-                )
-            else:
-                input_tensor = CGSiluSTE.apply(
-                    input_tensor,
-                    self.clip_val,
-                    self.clip_valn_const,
-                    self.num_bits,
-                    self.dequantize,
-                    self.inplace,
-                )
-        else:
-            input_tensor = SiluSTE.apply(
-                input_tensor,
-                self.clip_val,
-                self.clip_valn_const,
-                self.num_bits,
-                self.dequantize,
-                self.inplace,
-            )
-        return input_tensor
-
-    def __repr__(self):
-        clip_str = (
-            f", pos-clip={self.clip_val[0]}, neg-clip={self.clip_valn_const[0]}, "
-            f"cggrad={self.cggrad}"
-        )
-        inplace_str = ", inplace" if self.inplace else ""
-        return f"{self.__class__.__name__}(num_bits={self.num_bits}{clip_str}{inplace_str})"
-
-
-## Pytorch LSTM used for debugging
-def lstm_cell_q(qinput_tensor, qhidden, qw_ih, qw_hh, b_ih=None, b_hh=None):
+def lstm_cell_q(qinput, qhidden, qw_ih, qw_hh, b_ih=None, b_hh=None):
     """Regular LSTM Cell running operations on quantized activations and weights"""
 
     qhx, cx = qhidden
 
-    gates_i = F.linear(qinput_tensor, qw_ih, b_ih)  # pylint: disable=not-callable
-    gates_h = F.linear(qhx, qw_hh, b_hh)  # pylint: disable=not-callable
+    gates_i = F.linear(qinput, qw_ih, b_ih)
+    gates_h = F.linear(qhx, qw_hh, b_hh)
     ii, fi, ci, oi = torch.split(
         gates_i, qhx.size(1), dim=1
-    )  # ii = to input_tensor gate, from input_tensor; fi = to forget gate, from input_tensor; etc.
+    )  # ii = to input gate, from input; fi = to forget gate, from input; etc.
     ih, fh, ch, oh = torch.split(
         gates_h, qhx.size(1), dim=1
-    )  # ih = to input_tensor gate, from hidden; fh = to forget gate, from hidden; etc.
+    )  # ih = to input gate, from hidden; fh = to forget gate, from hidden; etc.
 
     ingate, forgetgate, cellgate, outgate = ii + ih, fi + fh, ch + ci, oh + oi
 
@@ -2988,7 +2885,9 @@ def lstm_cell_q(qinput_tensor, qhidden, qw_ih, qw_hh, b_ih=None, b_hh=None):
 
 
 class Qmax(nn.Module):
-    """Max with custom backward (gradient pass through for clip function)
+    """SAWB with custom backward (gradient pass through for clip function)
+    if align_zero: quantizer = SAWBSTE() for coded sawb such as 103, 403, 803
+    if not align_zero: quantizer = SAWBZeroSTE() for normal precision setting such as 2, 4, 8
     Qmax can quantize both weights and activations
     """
 
@@ -3013,81 +2912,85 @@ class Qmax(nn.Module):
         self.minmax = minmax
         self.perCh = perCh
         self.extend_act_range = extend_act_range
-        if minmax:
-            self.quantizer_name = "Qminmax"
-            if perGp:
-                self.quantizer = QminmaxPerGpSTE
-            else:
-                self.quantizer = QminmaxPerChSTE if perCh else QminmaxSTE
-        elif extend_act_range:
-            self.quantizer = QmaxExtendRangeSTE
-            self.quantizer_name = "QmaxExtend"
-            self.clip_ratio = -(2 ** (self.num_bits - 1)) / (
-                2 ** (self.num_bits - 1) - 1
-            )
-        else:
-            self.quantizer_name = "Qmax"
-            if perGp:
-                self.quantizer = QmaxPerGpSTE
-            else:
-                self.quantizer = QmaxPerChSTE if perCh else QmaxSTE
         self.perGp = perGp
+        self.recompute_clips = False
+
+        self.set_quantizer()
+
         self.movAvgFac = 0.1
         self.Niter = 0
+
         if self.perGp:
             self.register_buffer("clip_val", torch.zeros(perGp[0]))
             self.register_buffer("clip_valn", torch.zeros(perGp[0]))
         else:
             self.register_buffer(
-                "clip_val", torch.zeros(perCh) if perCh else torch.Tensor([0.0])
+                "clip_val", torch.zeros(perCh) if perCh else torch.Tensor([1.0])
             )
             self.register_buffer(
                 "clip_valn", torch.zeros(perCh) if perCh else torch.Tensor([0.0])
             )
+        # self.register_buffer("clip_val", torch.Tensor([1.0]))
+        # self.register_buffer("clip_valn", torch.Tensor([0.0]))
 
-    def forward(self, input_tensor):
+    def set_quantizer(self):
+        if self.minmax:
+            self.quantizer_name = "Qminmax"
+            if self.perGp:
+                self.quantizer = QminmaxPerGpSTE
+            else:
+                self.quantizer = QminmaxPerChSTE if self.perCh else QminmaxSTE
+        elif self.extend_act_range:
+            self.quantizer = QmaxExtendRangeSTE
+            self.quantizer_name = "QmaxExtend"
+            self.set_clip_ratio()
+        else:
+            self.quantizer_name = "Qmax"
+            if self.perGp:
+                self.quantizer = QmaxPerGpSTE
+            else:
+                self.quantizer = QmaxPerChSTE if self.perCh else QmaxSTE
+
+    def set_clip_ratio(self):
+        n_half = 2 ** (self.num_bits - 1)
+        self.clip_ratio = -n_half / (n_half - 1)
+
+    def forward(self, input):
         if self.perCh:
             if self.minmax:
-                clipval_new = torch.max(
-                    input_tensor.reshape([self.perCh, -1]), dim=1
-                ).values
-                clipvaln_new = torch.min(
-                    input_tensor.reshape([self.perCh, -1]), dim=1
-                ).values
+                clipval_new = torch.max(input.reshape([self.perCh, -1]), dim=1).values
+                clipvaln_new = torch.min(input.reshape([self.perCh, -1]), dim=1).values
             else:
                 clipval_new = torch.max(
-                    input_tensor.abs().reshape([self.perCh, -1]), dim=1
+                    input.abs().reshape([self.perCh, -1]), dim=1
                 ).values
                 clipvaln_new = -clipval_new
             assert (
-                len(clipval_new) == input_tensor.shape[0]
-            ), f"dimension error, input_tensor{input_tensor.shape}, clipval{clipval_new.shape}"
+                len(clipval_new) == input.shape[0]
+            ), f"dimension error, input{input.shape}, clipval{clipval_new.shape}"
         elif self.perGp:
             if self.minmax:
-                clipval_new = torch.max(input_tensor.reshape(self.perGp), dim=1).values
-                clipvaln_new = torch.min(input_tensor.reshape(self.perGp), dim=1).values
+                clipval_new = torch.max(input.reshape(self.perGp), dim=1).values
+                clipvaln_new = torch.min(input.reshape(self.perGp), dim=1).values
             else:
-                clipval_new = torch.max(
-                    input_tensor.abs().reshape(self.perGp), dim=1
-                ).values
+                clipval_new = torch.max(input.abs().reshape(self.perGp), dim=1).values
                 clipvaln_new = -clipval_new
-            assert (
-                len(clipval_new)
-                == (input_tensor.shape[0] * input_tensor.shape[1] // self.perGp[1])
-            ), f"dimension error, input_tensor{input_tensor.shape}, clipval{clipval_new.shape}"
+            assert len(clipval_new) == (
+                input.shape[0] * input.shape[1] // self.perGp[1]
+            ), f"dimension error, input{input.shape}, clipval{clipval_new.shape}"
         elif self.extend_act_range:
-            if input_tensor.max() >= input_tensor.min().abs():
-                clipval_new = input_tensor.max()
+            if input.max() >= input.min().abs():
+                clipval_new = input.max()
                 clipvaln_new = clipval_new * self.clip_ratio
             else:
-                clipvaln_new = input_tensor.min()
+                clipvaln_new = input.min()
                 clipval_new = clipvaln_new / self.clip_ratio
         else:
             if self.minmax:  # asymmetric
-                clipval_new = input_tensor.max()
-                clipvaln_new = input_tensor.min()
+                clipval_new = input.max()
+                clipvaln_new = input.min()
             else:  # symmetric
-                clipval_new = input_tensor.abs().max()
+                clipval_new = input.abs().max()
                 clipvaln_new = -clipval_new
 
         if len(clipval_new.shape) == 0:
@@ -3095,17 +2998,16 @@ class Qmax(nn.Module):
         if len(clipvaln_new.shape) == 0:
             clipvaln_new = clipvaln_new.unsqueeze(dim=0)
 
-        if self.Niter == 0 and self.training:
+        if (self.Niter == 0 and self.training) or self.recompute_clips:
             # to avoid unintended bwd ops added to the graph, cause memory leak sometimes
             with torch.no_grad():
-                self.clip_val.copy_(
-                    clipval_new
-                )  # similar to fill_(), will not change id(self.clip_val) but update the values
+                # similar to fill_(), will not change id(self.clip_val) but update the values
+                self.clip_val.copy_(clipval_new)
                 self.clip_valn.copy_(clipvaln_new)
 
         if self.training:
-            input_tensor = self.quantizer.apply(
-                input_tensor,
+            input = self.quantizer.apply(
+                input,
                 self.num_bits,
                 self.dequantize,
                 self.inplace,
@@ -3127,8 +3029,8 @@ class Qmax(nn.Module):
                         + clipvaln_new * self.movAvgFac
                     )
         else:
-            input_tensor = self.quantizer.apply(
-                input_tensor,
+            input = self.quantizer.apply(
+                input,
                 self.num_bits,
                 self.dequantize,
                 self.inplace,
@@ -3138,7 +3040,7 @@ class Qmax(nn.Module):
             )
 
         self.Niter += 1
-        return input_tensor
+        return input
 
     def __repr__(self):
         inplace_str = ", inplace" if self.inplace else ""
@@ -3162,24 +3064,25 @@ class QmaxSTE(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, input_tensor, num_bits, dequantize, inplace, cv, _cvn, align_zero):
+    def forward(
+        ctx, input, num_bits, dequantize, inplace, clip_val, clip_valn, align_zero
+    ):
         if inplace:
-            ctx.mark_dirty(input_tensor)
-        scale = (2**num_bits - 2) if align_zero else (2**num_bits - 1)
-        zero_point = 0.0
-        clip_val = cv.to(input_tensor.dtype)
+            ctx.mark_dirty(input)
+        n_levels = (2**num_bits - 2) if align_zero else (2**num_bits - 1)
+        scale = 1.0 / n_levels
+        zero_point = torch.tensor(0)
 
-        output = input_tensor.mul(1 / clip_val).clamp(-1, 1).mul(0.5).add(0.5)
+        output = input.div(clip_val).clamp(-1, 1).mul(0.5).add(0.5)
         output = linear_quantize(output, scale, zero_point, inplace)
         if dequantize:
             output = linear_dequantize(output, scale, zero_point, inplace)
             output = (2 * output - 1) * clip_val
         else:
             if not align_zero:
-                # NOTE: not *strictly* necessary but due to shifting output before linear_quantize
-                # (dequantize without align zero needs different math)
                 raise ValueError("Dequantize=False in QmaxSTE requires zero alignment")
-            output -= scale / 2
+            n_half = n_levels / 2
+            output = (output - n_half).to(torch.int8)
         return output
 
     @staticmethod
@@ -3193,30 +3096,44 @@ class QmaxPerChSTE(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, input_tensor, num_bits, dequantize, inplace, cv, _cvn, align_zero):
+    def forward(
+        ctx, input, num_bits, dequantize, inplace, clip_val, clip_valn, align_zero
+    ):
         if inplace:
-            ctx.mark_dirty(input_tensor)
-        scale = (2**num_bits - 2) if align_zero else (2**num_bits - 1)
-        zero_point = 0.0
+            ctx.mark_dirty(input)
+
         # here use symmetric similar to sawbperCh code
-        nspace = 2**num_bits - 2  # lose one level
+        n_levels = 2**num_bits - 2  # lose one level
         int_l = -(2 ** (num_bits - 1)) + 1
         int_u = -int_l  # symmetric
-        # original SAWB assumes odd number of bins when calc clip_val
-        scale = cv * 2 / nspace
+        scale = (
+            clip_val * 2 / n_levels
+        )  # original SAWB assumes odd number of bins when calc clip_val
         zero_point = torch.zeros_like(scale)  # centers around 0 and align 0
         # FIXME, fake quantize function only support float.
-        output = torch.fake_quantize_per_channel_affine(
-            input_tensor.float(),
-            scale.float(),
-            zero_point.float(),
-            axis=0,
-            quant_min=int_l,
-            quant_max=int_u,
-        ).to(input_tensor.dtype)
 
-        if not dequantize:
-            return (output.t() / scale).t()
+        if dequantize:
+            output = torch.fake_quantize_per_channel_affine(
+                input.float(),
+                scale.float(),
+                zero_point.float(),
+                axis=0,
+                quant_min=int_l,
+                quant_max=int_u,
+            ).to(input.dtype)
+        else:
+            output = (
+                torch.quantize_per_channel(
+                    input.float(),
+                    scale.float(),
+                    zero_point.float(),
+                    axis=0,
+                    dtype=torch.qint8,
+                )
+                .int_repr()
+                .clamp(int_l, int_u)
+            )
+
         return output
 
     @staticmethod
@@ -3231,35 +3148,33 @@ class QmaxPerGpSTE(torch.autograd.Function):
 
     @staticmethod
     def forward(
-        ctx, input_tensor, num_bits, _dequantize, inplace, cv, _cvn, align_zero
+        ctx, input, num_bits, dequantize, inplace, clip_val, clip_valn, align_zero
     ):
         if inplace:
-            ctx.mark_dirty(input_tensor)
-        input_tensor_shape = input_tensor.shape
-        clip_val_shape = cv.shape
-        # use clip_val shape to reshape input_tensor
-        input_tensor = input_tensor.reshape(clip_val_shape[0], -1)
-        scale = (2**num_bits - 2) if align_zero else (2**num_bits - 1)
-        zero_point = 0.0
+            ctx.mark_dirty(input)
+        # clip_val = cv
+        input_shape = input.shape
+        clip_val_shape = clip_val.shape
+        # use clip_val shape to reshape input
+        input = input.reshape(clip_val_shape[0], -1)
 
         # here use symmetric similar to sawbperCh code
-        nspace = 2**num_bits - 2  # lose one level
+        n_levels = 2**num_bits - 2  # lose one level
         int_l = -(2 ** (num_bits - 1)) + 1
         int_u = -int_l  # symmetric
         # original SAWB assumes odd number of bins when calc clip_val
-        scale = cv * 2 / nspace
+        scale = clip_val * 2 / n_levels
         zero_point = torch.zeros_like(scale)  # centers around 0 and align 0
-        # FIXME, fake quantize function only support float.
         output = torch.fake_quantize_per_channel_affine(
-            input_tensor.float(),
+            input.float(),
             scale.float(),
             zero_point.float(),
             axis=0,
             quant_min=int_l,
             quant_max=int_u,
-        ).to(input_tensor.dtype)
+        ).to(input.dtype)
         # reshape back to original shape
-        output = output.reshape(input_tensor_shape)
+        output = output.reshape(input_shape)
         return output
 
     @staticmethod
@@ -3273,17 +3188,26 @@ class QminmaxSTE(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, input_tensor, num_bits, _dequantize, inplace, cv, cvn, align_zero):
+    def forward(
+        ctx, input, num_bits, dequantize, inplace, clip_val, clip_valn, align_zero
+    ):
         if inplace:
-            ctx.mark_dirty(input_tensor)
-        cv, cvn = cv.to(input_tensor.dtype), cvn.to(input_tensor.dtype)
-        scale = (2**num_bits - 1) / (cv - cvn)
-        zero_point = cvn * scale
-        if align_zero:
-            zero_point = torch.round(zero_point)
+            ctx.mark_dirty(input)
+        clip_val, clip_valn = clip_val.to(input.dtype), clip_valn.to(input.dtype)
 
-        output = (input_tensor.clamp(cvn.item(), cv.item()) - cvn) * scale
-        output = (torch.round(output) + zero_point) / scale
+        n_levels = 2**num_bits - 1
+        scale, zero_point = asymmetric_linear_quantization_params(
+            num_bits, clip_valn, clip_val, align_zero, signed=False
+        )
+
+        output = input.clamp(clip_valn.item(), clip_val.item())
+        output = linear_quantize(output, scale, zero_point, inplace)
+        if dequantize:
+            output = linear_dequantize(output, scale, zero_point, inplace)
+        else:
+            n_half = 2 ** (num_bits - 1)
+            output = (output - n_half).to(torch.int8)
+
         return output
 
     @staticmethod
@@ -3295,18 +3219,21 @@ class QminmaxPerChSTE(torch.autograd.Function):
     """per channel minmax with zero alignment (asymmetric)"""
 
     @staticmethod
-    def forward(ctx, input_tensor, num_bits, _dequantize, inplace, cv, cvn, align_zero):
+    def forward(
+        ctx, input, num_bits, dequantize, inplace, clip_val, clip_valn, align_zero
+    ):
         if inplace:
-            ctx.mark_dirty(input_tensor)
-        cv, cvn = cv.to(input_tensor.dtype), cvn.to(input_tensor.dtype)
-        scale = (2**num_bits - 1) / (cv - cvn)
-        zero_point = cvn * scale
-        if align_zero:
-            zero_point = torch.round(zero_point)
-        output = (input_tensor.clamp(cvn[:, None], cv[:, None]) - cvn[:, None]) * scale[
-            :, None
-        ]
-        output = (torch.round(output) + zero_point[:, None]) / scale[:, None]
+            ctx.mark_dirty(input)
+        clip_val, clip_valn = clip_val.to(input.dtype), clip_valn.to(input.dtype)
+        scale = (clip_val - clip_valn) / (2**num_bits - 1)
+        zero_point = torch.round(clip_valn / scale).to(torch.int)
+
+        output = torch.round(input / scale[:, None] - zero_point[:, None])
+        if dequantize:
+            output = (output + zero_point[:, None]) * scale[:, None]
+        else:
+            output = output.to(torch.uint8)
+
         return output
 
     @staticmethod
@@ -3318,23 +3245,27 @@ class QminmaxPerGpSTE(torch.autograd.Function):
     """per group minmax with zero alignment (asymmetric)"""
 
     @staticmethod
-    def forward(ctx, input_tensor, num_bits, _dequantize, inplace, cv, cvn, align_zero):
+    def forward(
+        ctx, input, num_bits, dequantize, inplace, clip_val, clip_valn, align_zero
+    ):
         if inplace:
-            ctx.mark_dirty(input_tensor)
-        cv, cvn = cv.to(input_tensor.dtype), cvn.to(input_tensor.dtype)
-        input_tensor_shape = input_tensor.shape
-        clip_val_shape = cv.shape
-        input_tensor = input_tensor.reshape(clip_val_shape[0], -1)
-        scale = (2**num_bits - 1) / (cv - cvn)
-        zero_point = cvn * scale
-        if align_zero:
-            zero_point = torch.round(zero_point)
-        output = (input_tensor.clamp(cvn[:, None], cv[:, None]) - cvn[:, None]) * scale[
-            :, None
-        ]
-        output = (torch.round(output) + zero_point[:, None]) / scale[:, None]
+            ctx.mark_dirty(input)
+        clip_val, clip_valn = clip_val.to(input.dtype), clip_valn.to(input.dtype)
+        input_shape = input.shape
+        clip_val_shape = clip_val.shape
+        input = input.reshape(clip_val_shape[0], -1)
+        scale = (clip_val - clip_valn) / (2**num_bits - 1)
+        zero_point = torch.round(-clip_valn / scale).to(torch.int)
+
+        output = input.clamp(clip_valn[:, None], clip_val[:, None])
+        output = torch.round(output / scale[:, None] - zero_point[:, None])
+        if dequantize:
+            output = (output + zero_point[:, None]) * scale[:, None]
+        else:
+            n_half = 2 ** (num_bits - 1)
+            output = (output - n_half).to(torch.int8)
         # reshape back to original shape
-        output = output.reshape(input_tensor_shape)
+        output = output.reshape(input_shape)
         return output
 
     @staticmethod
@@ -3360,35 +3291,24 @@ class QmaxExtendRangeSTE(torch.autograd.Function):
 
     @staticmethod
     def forward(
-        ctx,
-        input_tensor,
-        num_bits,
-        dequantize,
-        _inplace,
-        clip_val,
-        clip_valn,
-        _align_zero,
+        ctx, input, num_bits, dequantize, inplace, clip_val, clip_valn, align_zero
     ):
-        clip_val = clip_val.to(input_tensor.dtype)
-        clip_valn = clip_valn.to(input_tensor.dtype)
+        clip_val, clip_valn = clip_val.to(input.dtype), clip_valn.to(input.dtype)
 
-        stepsize = clip_val / (2 ** (num_bits - 1) - 1)
+        scale = clip_val / (2 ** (num_bits - 1) - 1)
 
-        # clip input_tensor distribution on both sides
+        # clip input distribution on both sides
+        output = torch.where(input > clip_val, torch.ones_like(input) * clip_val, input)
         output = torch.where(
-            input_tensor > clip_val,
-            torch.ones_like(input_tensor) * clip_val,
-            input_tensor,
-        )
-        output = torch.where(
-            output < clip_valn, torch.ones_like(input_tensor) * clip_valn, output
+            output < clip_valn, torch.ones_like(input) * clip_valn, output
         )
 
         # quantize to range [-2^(b-1), 2^(b-1)-1]
-        output = torch.round(output / stepsize)
-
+        output = torch.round(output / scale)
         if dequantize:
-            output = output * stepsize
+            output = output * scale
+        else:
+            output = output.to(torch.int8)
         return output
 
     @staticmethod
@@ -3402,16 +3322,17 @@ class QminmaxSTEnoclip(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, input_tensor, nlevels, _dequantize, inplace, cv, cvn, align_zero):
+    def forward(
+        ctx, input, nlevels, dequantize, inplace, clip_val, clip_valn, align_zero
+    ):
         if inplace:
-            ctx.mark_dirty(input_tensor)
-        scale = nlevels / (cv - cvn)
-        zero_point = cvn * scale
-        if align_zero:
-            zero_point = torch.round(zero_point)
+            ctx.mark_dirty(input)
+        scale = (clip_val - clip_valn) / nlevels
+        zero_point = torch.round(-clip_valn / scale).to(torch.int)
 
-        output = (input_tensor.clamp(cvn.item(), cv.item()) - cvn) * scale
-        output = (torch.round(output) + zero_point) / scale
+        output = input.clamp(clip_valn.item(), clip_val.item())
+        output = (output - clip_valn) / scale
+        output = (torch.round(output) + zero_point) * scale
         return output
 
     @staticmethod
@@ -3419,14 +3340,13 @@ class QminmaxSTEnoclip(torch.autograd.Function):
         return grad_output, None, None, None, None, None, None
 
 
-# simply let PyTorch handle backward()
 class QmaxSimple(nn.Module):
     def __init__(self, num_bits, align_zero=False, minmax=False):
         """
         Simple max quantizer, let PyTorch handles backward.
         minmax = True means save clipvaln and clipval (asymmetric case),
         otherwise use clipval only (symmetric)
-        Details to be added..
+        details to be added..
         """
         super().__init__()
         self.num_bits = num_bits
@@ -3438,12 +3358,12 @@ class QmaxSimple(nn.Module):
         self.register_buffer("clip_val", torch.Tensor([0.0]))
         self.register_buffer("clip_valn", torch.Tensor([0.0]))
 
-    def forward(self, input_tensor):
+    def forward(self, input):
         if self.minmax:  # asymmetric
-            clipval_new = input_tensor.max()
-            clipvaln_new = input_tensor.min()
+            clipval_new = input.max()
+            clipvaln_new = input.min()
         else:  # symmetric
-            clipval_new = input_tensor.abs().max()
+            clipval_new = input.abs().max()
             clipvaln_new = -clipval_new
 
         if self.Niter == 0:
@@ -3464,13 +3384,13 @@ class QmaxSimple(nn.Module):
         if self.align_zero:
             zero_point = torch.round(zero_point)
 
-        input_tensor = (
-            input_tensor.clamp(clipvaln_new.item(), clipval_new.item()) - clipvaln_new
+        input = (
+            input.clamp(clipvaln_new.item(), clipval_new.item()) - clipvaln_new
         ) * scale
-        input_tensor = (torch.round(input_tensor) + zero_point) / scale
+        input = (torch.round(input) + zero_point) / scale
 
         self.Niter += 1
-        return input_tensor
+        return input
 
     def __repr__(self):
         return f"{self.__class__.__name__}(num_bits={self.num_bits}, quantizer=)"
@@ -3486,63 +3406,25 @@ class PerTokenMax(nn.Module):
         """
         super().__init__()
         self.num_bits = num_bits
-        self.register_buffer("clip_val", torch.Tensor([0.0]))
-        self.register_buffer("clip_valn", torch.Tensor([0.0]))
 
-    def forward(self, input_tensor):
-        self.clip_val = input_tensor.abs().max(dim=-1, keepdim=True)[0]
-        self.clip_valn = -self.clip_val
+    def forward(self, input):
+        scales = input.abs().max(dim=-1, keepdim=True)[0]
         levels = 2 ** (self.num_bits - 1) - 1
-        scales = self.clip_val.clamp(min=1e-5).div(levels)
-        input_tensor.div_(scales).round_().mul_(scales)
-        return input_tensor
+        scales.clamp_(min=1e-5).div_(levels)
+        input.div_(scales).round_().mul_(scales)
+        return input
 
     def __repr__(self):
         return f"{self.__class__.__name__}(num_bits={self.num_bits}, quantizer=)"
 
 
-class QMaxDynamic(nn.Module):
-    def __init__(self, num_bits, dim=-1):
-        """
-        For per-token or per-channel quantization using abs().max() as scale, usually for activation
-        and could be used for Qbmm M2 as well.
-        (reduce) dim = -1 -> abs() will output a column vector (if input is 2D) => per token
-                 dim = -2 -> per-channel
-        Zero is aligned so that the levels are symmetric around zero (lossing one level)
-        Since the token length is un-known before running, the quantizater can only calculate the
-        scales at the run times dynamically, meaning no trainable quantization scales is allowed.
-        (unless input seq length is always the same, not just padded to a fixed length.)
-        """
-        super().__init__()
-        self.num_bits = num_bits
-        self.levels = 2 ** (self.num_bits - 1) - 1
-        if isinstance(dim, str):
-            if "perCh" in dim or "per_channel" in dim:
-                dim = -2
-            elif "perToken" in dim or "per_token" in dim or "per_Token" in dim:
-                dim = -1
-        elif dim in [-1, -2]:
-            self.reduce_dim = dim
-        else:
-            raise ValueError(
-                f"Reduce dim can only be [-1, -2] or ['perCh', 'perToken'] but found {dim}"
-            )
-
-    def forward(self, input_tensor):
-        amax_dim = input_tensor.abs().max(dim=self.reduce_dim, keepdim=True)[0]
-        scales = amax_dim.clamp(min=1e-5).div(self.levels)
-        return input_tensor.div(scales).round().mul(scales)
-
-    def __repr__(self):
-        return f"{self.__class__.__name__}(num_bits={self.num_bits}, quantizer=)"
-
-
+# simply modified from SAWB
 class Qdynamic(nn.Module):
     def __init__(
         self,
         num_bits,
         qcfg,
-        _non_neg=False,
+        non_neg=False,
         align_zero=False,
         qmode="max",
         symmetric=False,
@@ -3558,14 +3440,15 @@ class Qdynamic(nn.Module):
         qmode = [max(minmax if non_neg==True) or percentile]
         will keep 3 clipvals:
         a) last clipval,
-        b) a moving average (For calib, use larger factor so newer clips contribute more)
+        b) a moving average (if for calib purpose, use larger factor so new clips contribute more)
         c) a simple average of the clipvals
         """
         super().__init__()
         self.num_bits = num_bits
-        self.symmetric = symmetric or qmode.endswith("sym")
+        self.symmetric = symmetric or qmode.endswith("_sym")
         self.nlevels = 2**self.num_bits - 2 if self.symmetric else 2**self.num_bits - 1
         self.align_zero = align_zero
+        #        self.non_neg = non_neg
         self.qmode = qmode
         self.quantizer = QminmaxSTEnoclip
         self.per = qcfg.get("clip_val_asst_percentile", (0.1, 99.9))
@@ -3598,52 +3481,36 @@ class Qdynamic(nn.Module):
         self.register_buffer("delta", torch.Tensor([1.0]))
         self.register_buffer("zero_point", torch.Tensor([0.0]))
 
-    def forward(self, input_tensor):
+    def forward(self, input):
         with torch.no_grad():
             if self.qmode.startswith("percentile"):
-                nelem = input_tensor.nelement()
-                cv_new_candidate = (
-                    input_tensor.reshape(1, -1)
+                nelem = input.nelement()
+                cv_new = (
+                    input.reshape(1, -1)
                     .float()
                     .kthvalue(
                         round(self.per[1] * 0.01 * nelem)
                     )  # built-in 'round' returns int
                     .values.data[0]
-                ).to(input_tensor.dtype)
-
-                # conventionaly percentile is input_tensor as 99.9 (% is implied),
-                # so we need *0.01 here
+                ).to(input.dtype)
+                # conventionaly percentile is input as 99.9 (% is implied), so we need *0.01 here
                 lower_k = round(self.per[0] * 0.01 * nelem)
-                cvn_new_candidate = (
-                    input_tensor.reshape(1, -1).float().kthvalue(lower_k).values.data[0]
+                cvn_new = (
+                    input.reshape(1, -1).float().kthvalue(lower_k).values.data[0]
                     if lower_k > 0
-                    else input_tensor.min()
+                    else input.min()
                 ).to(
-                    input_tensor.dtype
+                    input.dtype
                 )  # for very small tensor, lower_k could be 0, kthvalue(0) will cause error
-
-                if self.symmetric:
-                    cv_new = max(cv_new_candidate, cvn_new_candidate.abs())
-                    cvn_new = -cv_new
-                else:
-                    cv_new = cv_new_candidate
-                    cvn_new = cvn_new_candidate
             elif (
                 self.qmode == "sawb" and self.num_bits == 4
             ):  # only works for PACT+sym for weights
-                cv_new, _ = sawb_params_code(self.num_bits, 403, input_tensor)
+                cv_new, _ = sawb_params_code(self.num_bits, 403, input)
                 cvn_new = -cv_new
 
             else:  # i.e., minmax
-                cv_new = input_tensor.max()
-                cvn_new = -cv_new if self.symmetric else input_tensor.min()
-
-            if self.Niter == 0 and self.training:
-                # to avoid unintended bwd ops added to the graph, cause memory leak sometimes
-                with torch.no_grad():
-                    # similar to fill_(), will not change id(self.clip_val) but update the values
-                    self.clip_val = cv_new
-                    self.clip_valn = cvn_new
+                cv_new = input.max()
+                cvn_new = input.min()
 
             if self.training:  # or self.isPTQ
                 self.cv_last = cv_new
@@ -3685,7 +3552,7 @@ class Qdynamic(nn.Module):
 
         # handle backward by STE
         output = self.quantizer.apply(
-            input_tensor, self.nlevels, True, False, cv_new, cvn_new, self.align_zero
+            input, self.nlevels, True, False, cv_new, cvn_new, self.align_zero
         )
 
         self.Niter += 1
@@ -3697,8 +3564,17 @@ class Qdynamic(nn.Module):
         )
 
 
+try:
+    # Third Party
+    from piqa.piqa import MS_SSIM, SSIM
+
+    piqa_installed = True
+except:
+    piqa_installed = False
+
+
 class PTQLossFunc(nn.Module):
-    def __init__(  # pylint: disable=dangerous-default-value
+    def __init__(
         self,
         method="mse",
         Ntotal_iters=20000,
@@ -3713,7 +3589,6 @@ class PTQLossFunc(nn.Module):
             "lambda": {"range": (0.01, 0.01), "style": "constant"},
         },
     ):
-        super().__init__()
         self.method = method
         self.p = p
         self.count = 0
@@ -3727,11 +3602,10 @@ class PTQLossFunc(nn.Module):
         self.reset_ReSig = None
         if self.warmup2 >= self.warmup:
             self.reset_ReSig = int(Ntotal_iters * self.warmup2)
-        # NOTE, round_loss starts from warmup but decay could start from warmup2, controlled by
-        # LinearTempDecay() and CyclicTempDecay() when using delayed-decay (warmup2 !=0),
-        # we may further switch the formula, e.g. from 1ReSig to 3ReSig at decay_start
-        # NOTE method could be ['mse','normalized_change','ssim','ssimlog','ssimp0.2','ssimp0.5',
-        #   'ssimp2','fisher_diag','fisher_full', 'adaround']
+        # NOTE, round_loss starts from warmup but decay could start from warmup2,
+        # controlled by LinearTempDecay() and CyclicTempDecay() when using delayed-decay
+        # (warmup2 !=0), we may further switch the formula,
+        # e.g. from 1ReSig to 3ReSig at decay_start
 
         self.beta = adaR_anneal["beta"]  # brecq's settings was (20, 2)
         self.lambda_eq21 = adaR_anneal["lambda"]
@@ -3753,7 +3627,6 @@ class PTQLossFunc(nn.Module):
                 b_maxmin=self.beta["range"],
                 style=self.beta["style"],
             )
-            # style can be 'cos','V','cos*0.5', 'cos*2','V*2'...
 
         if self.lambda_eq21["style"] == "constant":
             self.lambda_decay = lambda x: self.lambda_eq21["range"][0]
@@ -3775,31 +3648,63 @@ class PTQLossFunc(nn.Module):
 
     def __call__(
         self, im1, im2, grad=None, gt=None
-    ):  # input_tensor im1, im2 are supposed to be q_out, fp_out
+    ):  # input im1, im2 are supposed to be q_out, fp_out
         self.count += 1
 
         if self.method == "mse":
             return F.mse_loss(im1, im2)
 
-        if self.method in ["mae", "l1"]:
+        elif self.method in ["mae", "l1"]:
             return F.l1_loss(im1, im2)
 
-        if self.method == "normalized_change":
+        elif self.method == "normalized_change":
             return torch.norm(im1 - im2) / torch.norm(im2)
 
-        if self.method == "fisher_diag":
+        elif "ssim" in self.method and piqa_installed:
+            # inputs can have very different numerical range, one is the original fp tensor,
+            # the other is clipvaln to clipval rescale to [0, 1] based on the larger range input,
+            # clamp the smaller range tensor using the larger range tensor's min/max
+            # in case of range inconsistency
+            im_min = [im1.min(), im2.min()]
+            im_max = [im1.max(), im2.max()]
+            im_range = [im_max[0] - im_min[0], im_max[1] - im_min[1]]
+            #        base_idx = 0 if im_range[0]>im_range[1] else 1
+            loss_func = SSIM(n_channels=im1.shape[1], value_range=1).to(im1.device)
+            im_scaled = [
+                (im1 - im_min[0]) / im_range[0],
+                (im2 - im_min[1]) / im_range[1],
+            ]
+
+            ssimloss = 1.0 - loss_func(*im_scaled)
+            loss = (
+                torch.log(ssimloss)
+                if self.method == "ssimlog"
+                else torch.pow(ssimloss, 0.2)
+                if self.method == "ssimp0.2"
+                else torch.pow(ssimloss, 0.5)
+                if self.method == "ssimp0.5"
+                else torch.pow(ssimloss, 2)
+                if self.method == "ssimp2"
+                else {"mse": F.mse_loss(im1, im2), "0.01ssim": 0.01 * ssimloss}
+                if self.method == "0.01ssim+mse"
+                else {"mse": F.mse_loss(im1, im2), "0.1ssim": 0.1 * ssimloss}
+                if self.method == "0.1ssim+mse"
+                else ssimloss
+            )  # 'ssim' or other 'ssimxxx' all default to simple form
+            return loss
+
+        elif self.method == "fisher_diag":
             return ((im1 - im2).pow(2) * grad.pow(2)).sum(1).mean()
 
-        if self.method == "fisher_full":
+        elif self.method == "fisher_full":
             a = (im1 - im2).abs()
             grad = grad.abs()
             batch_dotprod = torch.sum(a * grad, (1, 2, 3)).view(-1, 1, 1, 1)
             return (batch_dotprod * a * grad).mean() / 100
-
-        if "adaround" in self.method:
+        elif "adaround" in self.method:
             # default is mse + rounding loss as in the original paper
             round_loss = torch.tensor(0.0, device=im1.device)
-            # ssimloss = torch.tensor(0.0, device=im1.device)
+            ssimloss = torch.tensor(0.0, device=im1.device)
             losses = {}
             if self.count > self.loss_start:
                 # we can choose to anneal beta and lambda separately, or together
@@ -3824,6 +3729,7 @@ class PTQLossFunc(nn.Module):
                                 + (round_vals < 0.0).to(torch.float32)
                                 - (round_vals > 1.0).to(torch.float32)
                             )
+                        #                        round_loss += lambda_eq21 * (torch.sin(round_vals * math.pi).abs().pow(b)).sum() # sine multi-modal f_reg
                         round_loss += (
                             lambda_eq21
                             * (1 - ((round_vals - 0.5).abs() * 2).pow(b)).sum()
@@ -3834,9 +3740,7 @@ class PTQLossFunc(nn.Module):
                     torch.log(im1 + 1e-6), im2 + 1e-6, reduction="batchmean"
                 )
             elif self.method == "adaroundCos":
-                rec_loss = torch.mean(
-                    F.cosine_similarity(im1, im2)  # pylint: disable=not-callable
-                )
+                rec_loss = torch.mean(F.cosine_similarity(im1, im2))
             elif self.method == "adaroundL1":
                 rec_loss = F.l1_loss(im1, im2)
             elif self.method.startswith("adaroundMonAll"):
@@ -3846,16 +3750,23 @@ class PTQLossFunc(nn.Module):
                     losses["mse"] = F.mse_loss(
                         im1, im2
                     )  # backward will use "lp loss" instead of mse
+                    # losses['kl'] = F.kl_div( torch.log(im1+1e-8), im2+1e-8, reduction='batchmean')
+                    # if self.isOptimConv:
+                    #     # NOTE ssim can only be calculated for conv layers
+                    #     im_min=[im1.min(), im2.min()]
+                    #     im_max=[im1.max(), im2.max()]
+                    #     im_range=[im_max[0]-im_min[0], im_max[1]-im_min[1]]
+                    #     loss_func=SSIM(n_channels=im1.shape[1],value_range= 1,
+                    #                     window_size=min(11, im1.shape[-2], im1.shape[-1]) ).to(im1.device) #assume NCHW
+                    #     im_scaled = [(im1-im_min[0])/im_range[0], (im2-im_min[1])/im_range[1] ]
+                    #     losses['ssim'] = 1.0 - loss_func( *im_scaled )
 
                 with torch.set_grad_enabled(self.method.endswith("_norm")):
                     losses["norm"] = torch.norm(im1 - im2) / torch.norm(im2)
                 with torch.set_grad_enabled(self.method.endswith("_cos")):
-                    losses["cos"] = 1.0 - torch.mean(
-                        F.cosine_similarity(im1, im2)  # pylint: disable=not-callable
-                    )
+                    losses["cos"] = 1.0 - torch.mean(F.cosine_similarity(im1, im2))
                 with torch.set_grad_enabled(self.method.endswith("_ce")):
-                    # ce loss only works for last layer, "im1" should be q_out, im2 won't be used,
-                    # unless we want to check fp_out's ce loss
+                    # ce loss only works for last layer, "im1" should be q_out, im2 won't be used, unless we want to check fp_out's ce loss
                     losses["qce"] = (
                         0.0 * F.cross_entropy(im1, gt) if gt is not None else None
                     )
@@ -3866,13 +3777,13 @@ class PTQLossFunc(nn.Module):
                 elif self.method.endswith("_cos"):
                     rec_loss = losses["cos"]
                 elif self.method.endswith("_ce") and gt is not None:
-                    # only last layer will have gt in input_tensor, others will default to lp_loss
-                    rec_loss = losses["qce"]
+                    rec_loss = losses[
+                        "qce"
+                    ]  # only last layer will have gt in input, others will default to lp_loss
                 else:
                     rec_loss = lp_loss(im1, im2, p=self.p)
 
             else:
-                # use brecq and qdrop's implementation
                 rec_loss = lp_loss(im1, im2, p=self.p)
 
             losses["total"] = rec_loss + round_loss
@@ -3880,9 +3791,11 @@ class PTQLossFunc(nn.Module):
             losses["rounding"] = round_loss.detach()  # for tensorboard plot only
             return losses
 
-        # method not defined!
-        logger.info(f'PTQ Loss method {self.method} not defined. Use "MSE" instead.')
-        return F.mse_loss(im1, im2)
+        else:  # method not defined!
+            logger.info(
+                f'PTQ Loss method {self.method} not defined. Use "MSE" instead.'
+            )
+            return F.mse_loss(im1, im2)
 
 
 def round_ste(x: torch.Tensor):
@@ -3898,7 +3811,8 @@ def lp_loss(pred, tgt, p=2.0, reduction="none"):
     """
     if reduction == "none":
         return (pred - tgt).abs().pow(p).sum(1).mean()
-    return (pred - tgt).abs().pow(p).mean()
+    else:
+        return (pred - tgt).abs().pow(p).mean()
 
 
 class UniformAffineQuantizer(nn.Module):
@@ -3922,7 +3836,7 @@ class UniformAffineQuantizer(nn.Module):
         leaf_param: bool = False,
         inited: bool = False,
     ):
-        super().__init__()
+        super(UniformAffineQuantizer, self).__init__()
         self.sym = symmetric
         assert 2 <= n_bits <= 8, "bitwidth not supported"
         self.n_bits = n_bits
@@ -3943,7 +3857,9 @@ class UniformAffineQuantizer(nn.Module):
                     x, self.channel_wise
                 )
                 self.delta = torch.nn.Parameter(delta)
+                # self.zero_point = torch.nn.Parameter(self.zero_point)
             else:
+                # self.delta, self.zero_point = self.init_quantization_scale(x, self.channel_wise)
                 delta, zero_point = self.init_quantization_scale(x, self.channel_wise)
                 self.delta.fill_(delta)
                 self.zero_point.fill_(zero_point)
@@ -3995,6 +3911,7 @@ class UniformAffineQuantizer(nn.Module):
                     delta = 1e-8
 
                 zero_point = round(-x_min / delta)
+                # delta = torch.tensor(delta).type_as(x)
 
             elif self.scale_method == "mse":
                 x_max = x.max()
@@ -4016,9 +3933,9 @@ class UniformAffineQuantizer(nn.Module):
 
         return delta, zero_point
 
-    def quantize(self, x, clip_max, clip_min):
-        delta = (clip_max - clip_min) / (2**self.n_bits - 1)
-        zero_point = (-clip_min / delta).round()
+    def quantize(self, x, max, min):
+        delta = (max - min) / (2**self.n_bits - 1)
+        zero_point = (-min / delta).round()
         # we assume weight quantization is always signed
         x_int = torch.round(x / delta)
         x_quant = torch.clamp(x_int + zero_point, 0, self.n_levels - 1)
@@ -4032,8 +3949,8 @@ class UniformAffineQuantizer(nn.Module):
 
     def extra_repr(self):
         s = (
-            "bit={n_bits}, scale_method={scale_method}, symmetric={sym}, "
-            "channel_wise={channel_wise}, leaf_param={leaf_param}"
+            "bit={n_bits}, scale_method={scale_method}, symmetric={sym}, channel_wise={channel_wise},"
+            " leaf_param={leaf_param}"
         )
         return s.format(**self.__dict__)
 
@@ -4060,7 +3977,7 @@ class AdaRoundQuantizer(nn.Module):
         multimodal=False,
         scalebyoptim=False,
     ):
-        super().__init__()
+        super(AdaRoundQuantizer, self).__init__()
         self.n_bits = n_bits
         self.sym = symmetric
         self.n_levels = 2**n_bits
@@ -4088,12 +4005,23 @@ class AdaRoundQuantizer(nn.Module):
         self.Wshape = None
         self.reshape2 = None
 
+    #        self.init_alpha(x=weight_tensor.clone())
+    # in fms_mo, weight will not be available when quantizer is init'ed. will need to call init_alpha() in QanyNet4()
+
     def forward(self, x):
         if self.useSAWB:
             clip_val, _ = sawb_params_code(self.n_bits, self.SAWBcode, x, self.perCh)
             # NOTE this may cause problem when using multiGPUs or trying to learn delta
             self.delta = clip_val * 2 / (2**self.n_bits - 2)
             self.zero_point = (clip_val / self.delta).round()
+            # if self.perCh:
+            #     self.delta = clip_val*2/(2**self.n_bits - 2)
+            #     self.zero_point = (clip_val/ self.delta).round()
+            #     self.delta = self.delta.reshape([-1,1,1,1]) # broadcast to [Cout, 1,1,1]
+            #     self.zero_point = self.zero_point.reshape([-1,1,1,1])
+            # else:
+            #     self.delta.fill_( clip_val.item()*2/(2**self.n_bits - 2) ) # SAWB uses 15 bins instead of 16
+            #     self.zero_point.fill_( (clip_val.item()/ self.delta).round().item() )
         if self.perCh and len(self.delta.shape) < 4:
             # follow Qdrop's approach to create local delta/zp every time ...
             delta = self.delta.detach().reshape(
@@ -4118,6 +4046,13 @@ class AdaRoundQuantizer(nn.Module):
             if self.soft_targets:
                 x_int = x_floor + self.get_soft_targets()
             else:
+                # if self.multimodal:
+                #     h = self.get_soft_targets()
+                #     h_int = (torch.ones_like(h, dtype=torch.int8)*2 -
+                #             (h<1.5).to(torch.int8) - (h<0.5).to(torch.int8) - (h<-0.5).to(torch.int8) )
+                #     x_int = x_floor + h_int.float()
+                # else:
+                #     x_int = x_floor + (self.alpha >= 0).float()
                 x_int = x_floor + self.get_hard_targets()
 
         elif self.round_mode == "weight_STE":
@@ -4126,10 +4061,10 @@ class AdaRoundQuantizer(nn.Module):
                 return AdaRoundSTE.apply(
                     x, self.nspace, self.delta, self.zero_point, self.alpha
                 )
-            # during eval mode, will apply safety to ensure rounding part is either 0 or 1,
-            # no intermediate (floating) numbers
-            x_floor = torch.floor(x / delta)
-            x_int = x_floor + (self.alpha >= 0).float()
+            else:
+                # during eval mode, will apply safety to ensure rounding part is either 0 or 1, no intermediate (floating) numbers
+                x_floor = torch.floor(x / delta)
+                x_int = x_floor + (self.alpha >= 0).float()
 
         else:
             raise ValueError("Wrong rounding mode")
@@ -4141,16 +4076,14 @@ class AdaRoundQuantizer(nn.Module):
 
     def reset_ReSig_param(self, mode=0):
         if mode == 1:  # stretch h to [-1,2]
-            # multimodal Case 1: use a further stretched sigmoid.
-            # NOTE that eff grad nead h=0 and 1 will be large
+            # multimodal Case 1: use a further stretched sigmoid. NOTE that eff grad nead h=0 and 1 will be large
             self.gamma, self.zeta = -1.1, 2.1
             self.lower, self.upper = -1.0, 2.0  # clip range
             self.xscale = (
                 1.0  # could scale sigmoid curve x by 0.5 (ie, stretch 2x in x-dir)
             )
         elif mode == 3:
-            # multimodal Case 3: use 3 overlapping, scaled and shifted sigmoids
-            # (based on the original ReSig)
+            # multimodal Case 3: use 3 overlapping, scaled and shifted sigmoids (based on the original ReSig)
             self.gamma, self.zeta = -0.1, 1.1
             self.lower, self.upper = 0.0, 1.0
             self.xscale = 4.0
@@ -4172,21 +4105,22 @@ class AdaRoundQuantizer(nn.Module):
 
     def get_soft_targets(self):
         if self.multimodal == 3:
-            # Case 3: use 3 overlapping, shifted sigmoid,
-            # self.gamma, self.zeta = -0.1, 1.1, clip to [0, 1]
+            # Case 3: use 3 overlapping, shifted sigmoid, self.gamma, self.zeta = -0.1, 1.1, clip to [0, 1]
             return (
                 self.re_sig(-self.sigwidth)
                 + self.re_sig()
                 + self.re_sig(self.sigwidth)
                 - 1.0
             )
-        # either normal rectified sigmoid or further-stretched one, no xoffset
-        # self.gamma, self.zeta, and cvs are defined in self
-        return torch.clamp(
-            torch.sigmoid(self.alpha) * (self.zeta - self.gamma) + self.gamma,
-            self.lower,
-            self.upper,
-        )
+        else:
+            # either normal rectified sigmoid or further-stretched one, no xoffset
+            # self.gamma, self.zeta, and cvs are defined in self
+            # return self.re_sig()
+            return torch.clamp(
+                torch.sigmoid(self.alpha) * (self.zeta - self.gamma) + self.gamma,
+                self.lower,
+                self.upper,
+            )
 
     def get_hard_targets(self):
         assert (
@@ -4206,7 +4140,7 @@ class AdaRoundQuantizer(nn.Module):
 
         return h_int.float()
 
-    def init_alpha(self, x: torch.Tensor, _optim=None):
+    def init_alpha(self, x: torch.Tensor, optim=None):
         # follow Qdrop's style, use local delta every time
         self.reshape2 = [1] * len(self.Wshape)
         self.reshape2[0] = self.Wshape[
@@ -4226,30 +4160,51 @@ class AdaRoundQuantizer(nn.Module):
                 / self.xscale
             )  # => sigmoid(alpha*xscale) = rest
 
-            if self.alpha is not None and isinstance(self.alpha, nn.Parameter):
+            if self.alpha != None and isinstance(self.alpha, nn.Parameter):
                 # if we want to re-init alpha after it's been added to the optimizer,
-                # remember to update the parameter in optimizer as it will not update
-                # itself automatically... We could implement an automated optimizer update here,
-                # but don't see a real need so far.
-                # logger.info("!! AdaRound alpha is being re-assigned. Make sure it's not added to "
-                #             "your optimizer yet, or please update the optimizer accordingly !!")
+                # remember to update the parameter in optimizer as it will not update itself automatically...
+                # we could implement an automated optimizer update here, but don't see a real need so far.
+                #                logger.info(" !! AdaRound alpha is being re-assigned. Make sure it's not added to your optimizer yet, or Please update the optimizer accordingly !!")
                 with torch.no_grad():
                     self.alpha.copy_(alpha)
-                logger.info("!! AdaRound alpha is updated !!")
+                logger.info("!! AdaRound alpha is updated !! ")
             else:
                 self.alpha = nn.Parameter(alpha)
         else:
             raise NotImplementedError
 
-    def init_delta(self, W: torch.Tensor, qw_mode=None, _mod_name=None):
+    def init_delta(self, W: torch.Tensor, qw_mode=None, mod_name=None):
         Wfp = W.clone().detach()
         self.Wshape = W.shape
+
+        # borrowed from UniformAffineQuantizer.init_quantization_scale()
+        # x_max = Wfp.max()
+        # x_min = Wfp.min()
+        # best_score = 1e+10
+        # for i in range(80): # was 80 steps of 0.01, changed to 160 steps of 0.005
+        #     new_max = x_max * (1.0 - (i * 0.01))
+        #     new_min = x_min * (1.0 - (i * 0.01))
+        #     delta = (new_max - new_min) / (self.n_levels - 1)
+        #     zero_point = (- new_min / delta).round()
+
+        #     x_quant = torch.clamp( torch.round(Wfp/delta) + zero_point, 0, self.n_levels - 1)
+        #     Wq = (x_quant - zero_point) * delta
+        #     # L_p norm minimization as described in LAPQ
+        #     # https://arxiv.org/abs/1911.07190
+        #     loss = lp_loss(Wfp, Wq, p=2.4, reduction='all')
+        #     if i==0: loss0=loss.item()
+        #     if loss < best_score:
+        #         best_i, best_score, best_Wq = i, loss, Wq
+        #         self.delta = delta
+        #         self.zero_point = zero_point
+        # self.delta.fill_( self.delta.item() ) # delta and zp don't need to be parameters (will not optimize them after this point), just easier to access later.
+        # self.zero_point.fill_( self.zero_point.item() )
+        # loss_impr = best_score.item()/loss0
 
         # use Qdrop's implementation instead of BRECQ's
         observer = MSEObserver(
             bit=self.n_bits,
-            # a) should use self.sym, b) default is False but it's almost always True for weights
-            symmetric=False,
+            symmetric=False,  # a) should use self.sym, b) default is False but it's almost always True for weights
             ch_axis=0 if "perCh" in qw_mode else -1,
             useOptim4Search=self.scalebyoptim,
         )
@@ -4265,12 +4220,17 @@ class AdaRoundQuantizer(nn.Module):
         self.delta.copy_(_scale)
         self.zero_point.copy_(_zero_point)
 
+        # Qdrop reshape in forward() and create a local delta, zp every time?
+        # if 'perCh' in qw_mode:
+        #     self.delta = self.delta.detach().reshape([-1,1,1,1])
+        #     self.zero_point = self.zero_point.detach().reshape([-1,1,1,1])
+
 
 class AdaRoundSTE(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input_tensor, nspace, delta, zp, alpha):
+    def forward(ctx, input, nspace, delta, zp, alpha):
         gamma, zeta = -0.1, 1.1
-        x_floor = torch.floor(input_tensor / delta)
+        x_floor = torch.floor(input / delta)
         x_int = x_floor + torch.clamp(
             torch.sigmoid(alpha) * (zeta - gamma) + gamma, 0, 1
         )
@@ -4278,22 +4238,21 @@ class AdaRoundSTE(torch.autograd.Function):
         x_quant = torch.clamp(x_int + zp, 0, nspace)
         x_float_q = (x_quant - zp) * delta
 
-        ctx.save_for_backward(
-            input_tensor, alpha, delta, x_float_q.max(), x_float_q.min()
-        )
+        ctx.save_for_backward(input, alpha, delta, x_float_q.max(), x_float_q.min())
 
         return x_float_q
 
     @staticmethod
     def backward(ctx, grad_output):
-        input_tensor, alpha, delta, cv, cvn = ctx.saved_tensors  # delta is scale
+        input, alpha, delta, cv, cvn = ctx.saved_tensors  # delta is scale
         gamma, zeta = -0.1, 1.1
         sig_alpha = torch.sigmoid(alpha)
         h = sig_alpha * (zeta - gamma) + gamma
 
+        # dWq/d(alpha) = delta * (zeta - gamma) * sig(alpha)*(1-sig(alpha))
         grad_alpha = grad_output.clone()
         grad_alpha = torch.where(
-            torch.logical_or(input_tensor <= cvn, input_tensor >= cv),
+            torch.logical_or(input <= cvn, input >= cv),
             torch.zeros_like(grad_alpha),
             grad_alpha,
         )
@@ -4318,8 +4277,9 @@ class LinearTempDecay:
         self.curr_beta = 0.0
 
     def __call__(self, t):
-        # NOTE from warm_up to warm_up2, round_loss starts to work but no decay in beta and lambda
-        if t < self.start_decay:
+        if (
+            t < self.start_decay
+        ):  # NOTE from warm_up to warm_up2, round_loss starts to work but no decay in beta and lambda
             self.curr_beta = self.start_b
         elif t > self.t_max:
             self.curr_beta = self.end_b
@@ -4336,22 +4296,21 @@ class CyclicTempDecay:
         self.t_max = hold * t_max
         self.start_decay = warm_up * t_max
         # Annealing only happens between [warmup, hold]*t_max, from max_b -> min_b -> max_b
-        # e.g. usually no round_loss before 0.2*tmax (controlled by PTQloss_func),
-        # here we still return b_max, and hold at b_max after 0.8*tmax
+        # e.g. usually no round_loss before 0.2*tmax (controlled by PTQloss_func), here we still return b_max, and hold at b_max after 0.8*tmax
         self.max_b = b_maxmin[0]
         self.min_b = b_maxmin[1]
-        assert self.max_b > self.min_b, "max_b is smaller than min_b, Please check!"
+        assert self.max_b > self.min_b, "max_b is smaller than min_b, please check!"
         self.curr_beta = 0.0
-        # style can be 'V', 'V*2', 'V*3'... 'cos*0.5', 'cos*2', 'cos' ... shape*N where
-        # N means number of cycles, N could be 0.5
+        # style can be 'V', 'V*2', 'V*3'... 'cos*0.5', 'cos*2', 'cos' ... shape*N where N means number of cycles, N could be 0.5
         if "*" not in style:
             style = style + "*1"
         self.style_cycles = style.split("*")
         self.period = (self.t_max - self.start_decay) // float(self.style_cycles[1])
 
     def __call__(self, t):
-        # NOTE from warm_up to warm_up2, round_loss starts to work but no decay in beta and lambda
-        if t < self.start_decay:
+        if (
+            t < self.start_decay
+        ):  # NOTE from warm_up to warm_up2, round_loss starts to work but no decay in beta and lambda
             self.curr_beta = self.max_b
         elif self.start_decay <= t < self.t_max:
             rel_t = ((t - self.start_decay) % self.period) / self.period
@@ -4366,19 +4325,22 @@ class CyclicTempDecay:
                 self.curr_beta = self.min_b + (self.max_b - self.min_b) * abs(
                     1.0 - 2 * rel_t
                 )
+        #        else: # case t > t_max
+        #           # -> beta unchanged (hold), i.e. use last saved curr_beta
         return self.curr_beta
 
 
 def _transform_to_ch_axis(x, ch_axis):
     if ch_axis == -1:
         return x
-    x_dim = x.size()
-    new_axis_list = list(range(len(x_dim)))  # [i for i in range(len(x_dim))]
-    new_axis_list[ch_axis] = 0
-    new_axis_list[0] = ch_axis
-    x_channel = x.permute(new_axis_list)
-    y = torch.flatten(x_channel, start_dim=1)
-    return y
+    else:
+        x_dim = x.size()
+        new_axis_list = [i for i in range(len(x_dim))]
+        new_axis_list[ch_axis] = 0
+        new_axis_list[0] = ch_axis
+        x_channel = x.permute(new_axis_list)
+        y = torch.flatten(x_channel, start_dim=1)
+        return y
 
 
 def fake_quantize_per_tensor_affine(x, scale, zero_point, quant_min, quant_max):
@@ -4403,7 +4365,7 @@ def fake_quantize_per_channel_affine(
 
 class ObserverBase(nn.Module):
     def __init__(self, bit=8, symmetric=False, ch_axis=-1):
-        super().__init__()
+        super(ObserverBase, self).__init__()
         self.bit = bit
         self.symmetric = symmetric
         self.ch_axis = ch_axis
@@ -4454,7 +4416,7 @@ class ObserverBase(nn.Module):
 class MSEObserver(ObserverBase):
     # grid search: more accurate but slow
     def __init__(self, bit=8, symmetric=False, ch_axis=-1, useOptim4Search=False):
-        super().__init__(bit=bit, symmetric=symmetric, ch_axis=ch_axis)
+        super(MSEObserver, self).__init__(bit=bit, symmetric=symmetric, ch_axis=ch_axis)
         self.p = 2.4
         self.num = 100  # candidate num
         self.one_side_dist = None  # 'pos', 'neg', 'no'
@@ -4464,8 +4426,9 @@ class MSEObserver(ObserverBase):
         x = (pred - tgt).abs().pow(p)
         if self.ch_axis == -1:
             return x.mean()
-        y = _transform_to_ch_axis(x, self.ch_axis)
-        return y.mean(1)
+        else:
+            y = _transform_to_ch_axis(x, self.ch_axis)
+            return y.mean(1)
 
     def loss_fx(self, x, new_min, new_max):
         # should also consider channel here
@@ -4528,8 +4491,7 @@ class MSEObserver(ObserverBase):
                 best_score = torch.min(best_score, score)
         return best_min, best_max
 
-    # Instead of grid search, use optimizer to find cv and cvn, then scale and zp accordingly
-    def search_by_optim(self, x, _ref_min=None, _ref_max=None):
+    def search_by_optim(self, x, ref_min=None, ref_max=None):
         Wfp = x.clone().detach()
         Wshape = Wfp.shape
         Wfp = Wfp.reshape((Wfp.shape[0], -1) if self.ch_axis != -1 else (1, -1))
@@ -4544,19 +4506,22 @@ class MSEObserver(ObserverBase):
                 cv = torch.kthvalue(Wfp, N99p9).values
             else:
                 logger.info("!! nbits != 4 or 8, not implemented !!")
-                cvn = torch.empty(Wfp)
-                cv = torch.empty(Wfp)
             Wfp = Wfp.reshape(Wshape)
 
         cv.requires_grad = True
         cvn.requires_grad = True
         optim = torch.optim.Adam([cvn, cv], lr=1e-2)
 
-        for _i in range(self.num):
+        for i in range(self.num):
             optim.zero_grad()
             loss = torch.sum(self.loss_fx_grad(Wfp, cvn, cv))
             loss.backward()
             optim.step()
+            # if i%100==0:
+            #     if ref_min is not None:
+            #         logger.info(f"{i} loss {loss:.4e} cvn from ref {(cvn-ref_min).mean():.4e} cv from ref {(cv-ref_max).mean():.4e}")
+            #     else:
+            #         logger.info(f"{i} loss {loss:.4e} cvn {cvn[0]:.4e} cv {cv[0]:.4e}")
 
         return cvn.detach(), cv.detach()
 
@@ -4584,7 +4549,7 @@ class MSEObserver(ObserverBase):
     def forward(self, x_orig):
         if x_orig.numel() == 0:
             return x_orig
-        x = x_orig.clone().detach().to(self.min_val.dtype)  # pylint: disable=access-member-before-definition
+        x = x_orig.clone().detach().to(self.min_val.dtype)
         if self.one_side_dist is None:
             self.one_side_dist = (
                 "pos" if x.min() >= 0.0 else "neg" if x.max() <= 0.0 else "no"
@@ -4596,8 +4561,6 @@ class MSEObserver(ObserverBase):
             best_min, best_max = self.perform_1D_search(x)
         else:  # 2-d search
             if self.useOptim4Search:
-                # # default method may not find the optimal values and it's very slow
-                # best_min0, best_max0 = self.perform_2D_search(x)
                 best_min, best_max = self.search_by_optim(
                     x
                 )  # , best_min0, best_max0) # Adam 100 iters is ~ 10x faster
@@ -4611,7 +4574,7 @@ class MSEObserver(ObserverBase):
 class Qbypass(nn.Module):
     """
     no quantization at all, straight-thru
-    in place of lambda function when using nbits=32 and 16.
+    in place of lambda function when using nbits=32.
     to avoid issue when pickle (ie torch.save) of lambda
     (seems to be a problem only for DDP)
     """
@@ -4619,32 +4582,26 @@ class Qbypass(nn.Module):
     def __init__(self):
         super().__init__()
 
-    def forward(self, input_tensor):
-        return input_tensor
+    def forward(self, input):
+        return input
 
 
 def transformers_prepare_input(
     data: Union[torch.Tensor, Any], dev="cuda"
 ) -> Union[torch.Tensor, Any]:
     """
-    Prepares one `data` before feeding it to the model, be it a tensor or a
-    nested list/dictionary of tensors.
+    Prepares one `data` before feeding it to the model,
+    be it a tensor or a nested list/dictionary of tensors.
     """
     if isinstance(data, Mapping):
         return type(data)(
             {k: transformers_prepare_input(v, dev=dev) for k, v in data.items()}
         )
-    if isinstance(data, (tuple, list)):
+    elif isinstance(data, (tuple, list)):
         return type(data)(transformers_prepare_input(v, dev=dev) for v in data)
-    if isinstance(data, torch.Tensor):
-        kwargs = {"device": dev}
-        # if self.deepspeed and data.dtype != torch.int64:
-        #     # NLP models input_tensors are int64 and those get adjusted to the right dtype of the
-        #     # embedding. Other models such as wav2vec2's input_tensors are already float and thus
-        #     # may need special handling to match the dtypes of the model
-        #     kwargs.update(dict(dtype=self.args.hf_deepspeed_config.dtype()))
+    elif isinstance(data, torch.Tensor):
+        kwargs = dict(device=dev)
         return data.to(**kwargs)
-
     return data
 
 
@@ -4662,7 +4619,7 @@ def transformers_prepare_input(
 class SAWB_sw(nn.Module):
     """
     SAWB with custom backward: gradient passed through clip function
-        SAWBZeroSTE_sw: grad of clipped input_tensors is zero (as per SAWB paper)
+        SAWBZeroSTE_sw: grad of clipped inputs is zero (as per SAWB paper)
         SAWBPlusZeroSTE_sw: grad passed through everywhere
     For swcap compatibility, zero alignment is enforced (one level is lost)
 
@@ -4671,7 +4628,7 @@ class SAWB_sw(nn.Module):
     """
 
     def __init__(self, num_bits, dequantize=False, clipSTE=True, recompute=False):
-        super().__init__()
+        super(SAWB_sw, self).__init__()
         self.num_bits = num_bits
         self.dequantize = dequantize
         self.recompute = recompute
@@ -4687,17 +4644,17 @@ class SAWB_sw(nn.Module):
         else:
             self.quantizer = SAWBZeroSTE_sw  # zero is always aligned for swcap
 
-    def forward(self, input_tensor):
+    def forward(self, input):
         if self.training or self.recompute:
             clipval_new = (
-                sawb_params_code_sw(self.code_dict[self.num_bits], input_tensor)
+                sawb_params_code_sw(self.code_dict[self.num_bits], input)
                 if self.num_bits in self.code_dict
-                else input_tensor.abs().max()
+                else input.abs().max()
             )  # dim 0 tensor
             clipval_new = clipval_new.unsqueeze(dim=0)
 
             output = self.quantizer.apply(
-                input_tensor, clipval_new, self.scale_sym, self.dequantize
+                input, clipval_new, self.scale_sym, self.dequantize
             )
 
             with torch.no_grad():
@@ -4712,7 +4669,7 @@ class SAWB_sw(nn.Module):
                 )  # in-place fill ensures correct update on multi-gpu
         else:
             output = self.quantizer.apply(
-                input_tensor, self.clip_val, self.scale_sym, self.dequantize
+                input, self.clip_val, self.scale_sym, self.dequantize
             )
 
         return output
@@ -4729,14 +4686,14 @@ class SAWBPlusZeroSTE_sw(torch.autograd.Function):
     """
     symmetric SAWB+ quantizer
     no zero point
-    input_tensor zero is always aligned to integer zero and mapped to zero output
+    input zero is always aligned to integer zero and mapped to zero output
     gradients are passed through also for values beyond clipping range
     """
 
     @staticmethod
-    def forward(ctx, input_tensor, clip_val, scale_sym, dequantize):
+    def forward(ctx, input, clip_val, scale_sym, dequantize):
         output = torch.round(
-            input_tensor.mul(1 / clip_val).clamp(-1, 1) * scale_sym
+            input.mul(1 / clip_val).clamp(-1, 1) * scale_sym
         )  # INT4: [-7, 7]; INT8: [-127, 127]
         if dequantize:
             output = output / scale_sym * clip_val  # range [-clip_val, clip_val]
@@ -4752,35 +4709,31 @@ class SAWBZeroSTE_sw(torch.autograd.Function):
     """
     symmetric SAWB quantizer
     no zero point
-    input_tensor zero is always aligned to integer zero and mapped to zero output
+    input zero is always aligned to integer zero and mapped to zero output
     """
 
     @staticmethod
-    def forward(ctx, input_tensor, clip_val, scale_sym, dequantize):
+    def forward(ctx, input, clip_val, scale_sym, dequantize):
         output = torch.round(
-            input_tensor.mul(1 / clip_val).clamp(-1, 1) * scale_sym
+            input.mul(1 / clip_val).clamp(-1, 1) * scale_sym
         )  # INT4: [-7, 7]; INT8: [-127, 127]
         if dequantize:
             output = output / scale_sym * clip_val  # range [-clip_val, clip_val]
-        ctx.save_for_backward(input_tensor, clip_val)
+        ctx.save_for_backward(input, clip_val)
         ctx.scale = 1 if dequantize else scale_sym / clip_val
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
-        input_tensor, clip_val = ctx.saved_tensors
-        grad_input_tensor = grad_output.clone()
-        grad_input_tensor = torch.where(
-            input_tensor < -clip_val,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        input, clip_val = ctx.saved_tensors
+        grad_input = grad_output.clone()
+        grad_input = torch.where(
+            input < -clip_val, torch.zeros_like(grad_input), grad_input
         )
-        grad_input_tensor = torch.where(
-            input_tensor > clip_val,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        grad_input = torch.where(
+            input > clip_val, torch.zeros_like(grad_input), grad_input
         )
-        return grad_input_tensor * ctx.scale, None, None, None
+        return grad_input * ctx.scale, None, None, None
 
 
 def sawb_params_code_sw(code, out):
@@ -4822,7 +4775,7 @@ class Qmax_sw(nn.Module):
     """
 
     def __init__(self, num_bits, dequantize=False, recompute=False):
-        super().__init__()
+        super(Qmax_sw, self).__init__()
         self.num_bits = num_bits
         self.dequantize = dequantize
         self.recompute = recompute
@@ -4832,12 +4785,12 @@ class Qmax_sw(nn.Module):
         self.register_buffer("first_call", torch.tensor(1, dtype=torch.int))
         self.register_buffer("clip_val", torch.Tensor([0.0]))  # dim 1 tensor
 
-    def forward(self, input_tensor):
+    def forward(self, input):
         if self.training or self.recompute:
-            clipval_new = input_tensor.abs().max().unsqueeze(dim=0)  # symmetric
+            clipval_new = input.abs().max().unsqueeze(dim=0)  # symmetric
 
             output = self.quantizer.apply(
-                input_tensor, clipval_new, self.scale_sym, self.dequantize
+                input, clipval_new, self.scale_sym, self.dequantize
             )
 
             with torch.no_grad():
@@ -4852,7 +4805,7 @@ class Qmax_sw(nn.Module):
                 )  # in-place fill ensures correct update on multi-gpu
         else:
             output = self.quantizer.apply(
-                input_tensor, self.num_bits, self.clip_val, self.dequantize
+                input, self.num_bits, self.clip_val, self.dequantize
             )
         return output
 
@@ -4867,13 +4820,13 @@ class QmaxSTE_sw(torch.autograd.Function):
     """
     MAX quantizer with symmetric clips
     no zero point
-    input_tensor zero is always aligned to integer zero and mapped to zero output
+    input zero is always aligned to integer zero and mapped to zero output
     """
 
     @staticmethod
-    def forward(ctx, input_tensor, cv, scale_sym, dequantize):
+    def forward(ctx, input, cv, scale_sym, dequantize):
         output = torch.round(
-            input_tensor.mul(1 / cv).clamp(-1, 1) * scale_sym
+            input.mul(1 / cv).clamp(-1, 1) * scale_sym
         )  # INT4: [-7, 7]; INT8: [-127, 127]
         if dequantize:
             output = output / scale_sym * cv  # range [-clip_val, clip_val]
@@ -4908,7 +4861,7 @@ class PACT2_sw(nn.Module):
         align_zero=False,
         pact_plus=False,
     ):
-        super().__init__()
+        super(PACT2_sw, self).__init__()
         self.num_bits = num_bits
         if isinstance(init_clip_val, torch.Tensor) and isinstance(
             init_clip_valn, torch.Tensor
@@ -4922,11 +4875,11 @@ class PACT2_sw(nn.Module):
             self.clip_valn = nn.Parameter(torch.Tensor([init_clip_valn]))
         else:
             raise ValueError(
-                "FMS: init_clip_val and init_clip_valn should be the same instance type."
+                "init_clip_val and init_clip_valn should be the same instance type."
             )
 
         # break clip symmetry to avoid additional Q level due to rounding
-        if self.clip_val.item() == -self.clip_valn.item():  # pylint: disable=invalid-unary-operand-type
+        if self.clip_val.item() == -self.clip_valn.item():
             self.clip_valn.data += 0.00001
 
         self.dequantize = dequantize
@@ -4936,9 +4889,9 @@ class PACT2_sw(nn.Module):
         self.register_buffer("zero_point", torch.Tensor([0.0]))
         self.quantizer = PACT2plus_STE_sw if pact_plus else PACT2_STE_sw
 
-    def forward(self, input_tensor):
+    def forward(self, input):
         output = self.quantizer.apply(
-            input_tensor,
+            input,
             self.clip_val,
             self.clip_valn,
             self.num_bits,
@@ -4960,8 +4913,7 @@ class PACT2_sw(nn.Module):
 
     def __repr__(self):
         return (
-            f"PACT2{'plus' if self.pact_plus else ''}_sw(bits={self.num_bits}), "
-            f"pos-clip={self.clip_val[0]:.4f}, "
+            f"PACT2{'plus' if self.pact_plus else ''}_sw(bits={self.num_bits}), pos-clip={self.clip_val[0]:.4f}, "
             f"neg-clip={self.clip_valn[0]:.4f}, quantizer={self.quantizer})"
         )
 
@@ -4972,10 +4924,8 @@ class PACT2_STE_sw(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(
-        ctx, input_tensor, clip_val, clip_valn, num_bits, dequantize, align_zero
-    ):
-        ctx.save_for_backward(input_tensor, clip_val, clip_valn)
+    def forward(ctx, input, clip_val, clip_valn, num_bits, dequantize, align_zero):
+        ctx.save_for_backward(input, clip_val, clip_valn)
         scale, zero_point = asymmetric_linear_quantization_params(
             num_bits,
             clip_valn.data,
@@ -4985,15 +4935,13 @@ class PACT2_STE_sw(torch.autograd.Function):
         )
         if isinstance(clip_val, torch.Tensor):
             output = torch.where(
-                input_tensor > clip_val,
-                torch.ones_like(input_tensor) * clip_val,
-                input_tensor,
+                input > clip_val, torch.ones_like(input) * clip_val, input
             )
             output = torch.where(
-                output < clip_valn, torch.ones_like(input_tensor) * clip_valn, output
+                output < clip_valn, torch.ones_like(input) * clip_valn, output
             )
         else:
-            output = clamp(input_tensor, clip_valn, clip_val)
+            output = clamp(input, clip_valn, clip_val)
         output = linear_quantize(output, scale, zero_point)
         if dequantize:
             output = linear_dequantize(output, scale, zero_point)
@@ -5003,34 +4951,30 @@ class PACT2_STE_sw(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        input_tensor, clip_val, clip_valn = ctx.saved_tensors
-        grad_input_tensor = grad_output.clone()
-        grad_input_tensor = torch.where(
-            input_tensor <= clip_valn,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        input, clip_val, clip_valn = ctx.saved_tensors
+        grad_input = grad_output.clone()
+        grad_input = torch.where(
+            input <= clip_valn, torch.zeros_like(grad_input), grad_input
         )
-        grad_input_tensor = torch.where(
-            input_tensor >= clip_val,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        grad_input = torch.where(
+            input >= clip_val, torch.zeros_like(grad_input), grad_input
         )
 
         grad_alpha = grad_output.clone()
         grad_alpha = torch.where(
-            input_tensor < clip_val, torch.zeros_like(grad_alpha), grad_alpha
+            input < clip_val, torch.zeros_like(grad_alpha), grad_alpha
         )
         grad_alpha = grad_alpha.sum().expand_as(clip_val)
 
         grad_alphan = grad_output.clone()
         grad_alphan = torch.where(
-            input_tensor > clip_valn, torch.zeros_like(grad_alphan), grad_alphan
+            input > clip_valn, torch.zeros_like(grad_alphan), grad_alphan
         )
         grad_alphan = grad_alphan.sum().expand_as(clip_valn)
 
         scale = ctx.scale  # need to scale gradient if did not dequantize
         return (
-            grad_input_tensor * scale,
+            grad_input * scale,
             grad_alpha * scale,
             grad_alphan * scale,
             None,
@@ -5046,10 +4990,8 @@ class PACT2plus_STE_sw(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(
-        ctx, input_tensor, clip_val, clip_valn, num_bits, dequantize, align_zero
-    ):
-        ctx.save_for_backward(input_tensor, clip_val, clip_valn)
+    def forward(ctx, input, clip_val, clip_valn, num_bits, dequantize, align_zero):
+        ctx.save_for_backward(input, clip_val, clip_valn)
 
         num_gaps = 2**num_bits - 1  # quantization levels - 1
         scale = num_gaps / (clip_val - clip_valn)
@@ -5061,15 +5003,13 @@ class PACT2plus_STE_sw(torch.autograd.Function):
 
         if isinstance(clip_val, torch.Tensor):
             output = torch.where(
-                input_tensor > clip_val,
-                torch.ones_like(input_tensor) * clip_val,
-                input_tensor,
+                input > clip_val, torch.ones_like(input) * clip_val, input
             )
             output = torch.where(
-                output < clip_valn, torch.ones_like(input_tensor) * clip_valn, output
+                output < clip_valn, torch.ones_like(input) * clip_valn, output
             )
         else:
-            output = clamp(input_tensor, clip_valn, clip_val)
+            output = clamp(input, clip_valn, clip_val)
         output = linear_quantize(output, scale, zero_point)
         if dequantize:
             output = linear_dequantize(output, scale, zero_point)
@@ -5084,43 +5024,39 @@ class PACT2plus_STE_sw(torch.autograd.Function):
         return output, scale, zero_point
 
     @staticmethod
-    def backward(ctx, grad_output, _grad_scale, _grad_zp):
-        input_tensor, clip_val, clip_valn = ctx.saved_tensors
+    def backward(ctx, grad_output, grad_scale, grad_zp):
+        input, clip_val, clip_valn = ctx.saved_tensors
         num_gaps = ctx.num_gaps
         stepsize = ctx.stepsize
-        z = (input_tensor - clip_valn) / stepsize
+        z = (input - clip_valn) / stepsize
         delta_z = (z - torch.round(z)) / num_gaps
 
-        grad_input_tensor = grad_output.clone()
-        grad_input_tensor = torch.where(
-            input_tensor <= clip_valn,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        grad_input = grad_output.clone()
+        grad_input = torch.where(
+            input <= clip_valn, torch.zeros_like(grad_input), grad_input
         )
-        grad_input_tensor = torch.where(
-            input_tensor >= clip_val,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        grad_input = torch.where(
+            input >= clip_val, torch.zeros_like(grad_input), grad_input
         )
 
         grad_alpha = -grad_output.clone() * delta_z
         grad_alphan = -grad_alpha
 
         grad_alpha = torch.where(
-            input_tensor <= clip_valn, torch.zeros_like(grad_alpha), grad_alpha
+            input <= clip_valn, torch.zeros_like(grad_alpha), grad_alpha
         )
-        grad_alpha = torch.where(input_tensor >= clip_val, grad_output, grad_alpha)
+        grad_alpha = torch.where(input >= clip_val, grad_output, grad_alpha)
         grad_alphan = torch.where(
-            input_tensor >= clip_val, torch.zeros_like(grad_alphan), grad_alphan
+            input >= clip_val, torch.zeros_like(grad_alphan), grad_alphan
         )
-        grad_alphan = torch.where(input_tensor <= clip_valn, grad_output, grad_alphan)
+        grad_alphan = torch.where(input <= clip_valn, grad_output, grad_alphan)
 
         grad_alpha = grad_alpha.sum().expand_as(clip_val)
         grad_alphan = grad_alphan.sum().expand_as(clip_valn)
 
         scale = ctx.scale  # need to scale gradient if did not dequantize
         return (
-            grad_input_tensor * scale,
+            grad_input * scale,
             grad_alpha * scale,
             grad_alphan * scale,
             None,
@@ -5137,7 +5073,7 @@ class PACT2sym_sw(nn.Module):
     """
 
     def __init__(self, num_bits, init_clip_val=8.0, dequantize=False):
-        super().__init__()
+        super(PACT2sym_sw, self).__init__()
         self.num_bits = num_bits
         self.clip_val = (
             nn.Parameter(init_clip_val)
@@ -5148,9 +5084,9 @@ class PACT2sym_sw(nn.Module):
         self.dequantize = dequantize
         self.quantizer = PACT2sym_STE_sw
 
-    def forward(self, input_tensor):
+    def forward(self, input):
         return self.quantizer.apply(
-            input_tensor, self.clip_val, self.scale_sym, self.dequantize
+            input, self.clip_val, self.scale_sym, self.dequantize
         )
 
     def __repr__(self):
@@ -5168,20 +5104,18 @@ class PACT2sym_STE_sw(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, input_tensor, clip_val, scale_sym, dequantize):
-        ctx.save_for_backward(input_tensor, clip_val)
+    def forward(ctx, input, clip_val, scale_sym, dequantize):
+        ctx.save_for_backward(input, clip_val)
 
         if isinstance(clip_val, torch.Tensor):
             output = torch.where(
-                input_tensor > clip_val,
-                torch.ones_like(input_tensor) * clip_val,
-                input_tensor,
+                input > clip_val, torch.ones_like(input) * clip_val, input
             )
             output = torch.where(
-                output < -clip_val, torch.ones_like(input_tensor) * (-clip_val), output
+                output < -clip_val, torch.ones_like(input) * (-clip_val), output
             )
         else:
-            output = clamp(input_tensor, -clip_val, clip_val)
+            output = clamp(input, -clip_val, clip_val)
 
         output = torch.round(output / clip_val * scale_sym)
         if dequantize:
@@ -5192,29 +5126,25 @@ class PACT2sym_STE_sw(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        input_tensor, clip_val = ctx.saved_tensors
-        grad_input_tensor = grad_output.clone()
-        grad_input_tensor = torch.where(
-            input_tensor <= -clip_val,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        input, clip_val = ctx.saved_tensors
+        grad_input = grad_output.clone()
+        grad_input = torch.where(
+            input <= -clip_val, torch.zeros_like(grad_input), grad_input
         )
-        grad_input_tensor = torch.where(
-            input_tensor >= clip_val,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        grad_input = torch.where(
+            input >= clip_val, torch.zeros_like(grad_input), grad_input
         )
 
         grad_alpha = grad_output.clone()
         grad_alpha = torch.where(
-            torch.logical_and(input_tensor < clip_val, input_tensor > -clip_val),
+            torch.logical_and(input < clip_val, input > -clip_val),
             torch.zeros_like(grad_alpha),
             grad_alpha,
         )
         grad_alpha = grad_alpha.sum().expand_as(clip_val)
 
         scale = ctx.scale  # need to scale gradient if did not dequantize
-        return grad_input_tensor * scale, grad_alpha * scale, None, None, None
+        return grad_input * scale, grad_alpha * scale, None, None, None
 
 
 class PACT_sw(nn.Module):
@@ -5224,7 +5154,7 @@ class PACT_sw(nn.Module):
     """
 
     def __init__(self, num_bits, init_clip_val=8.0, dequantize=False, align_zero=False):
-        super().__init__()
+        super(PACT_sw, self).__init__()
         self.num_bits = num_bits
         self.clip_val = (
             nn.Parameter(init_clip_val)
@@ -5236,9 +5166,9 @@ class PACT_sw(nn.Module):
         self.register_buffer("scale", torch.Tensor([1.0]))
         self.quantizer = PACT_STE_sw
 
-    def forward(self, input_tensor):
+    def forward(self, input):
         output = self.quantizer.apply(
-            input_tensor, self.clip_val, self.num_bits, self.dequantize, self.align_zero
+            input, self.clip_val, self.num_bits, self.dequantize, self.align_zero
         )
 
         with torch.no_grad():
@@ -5259,11 +5189,9 @@ class PACT_STE_sw(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, input_tensor, clip_val, num_bits, dequantize, align_zero):
-        assert input_tensor.min() >= 0, (
-            "FMS: input_tensor to one-sided PACT" "should be non-negative."
-        )
-        ctx.save_for_backward(input_tensor, clip_val)
+    def forward(ctx, input, clip_val, num_bits, dequantize, align_zero):
+        assert input.min() >= 0, "input to 1-sided PACT should be non-negative"
+        ctx.save_for_backward(input, clip_val)
         scale, zero_point = asymmetric_linear_quantization_params(
             num_bits,
             saturation_min=0,
@@ -5273,12 +5201,10 @@ class PACT_STE_sw(torch.autograd.Function):
         )
         if isinstance(clip_val, torch.Tensor):
             output = torch.where(
-                input_tensor > clip_val,
-                torch.ones_like(input_tensor) * clip_val,
-                input_tensor,
+                input > clip_val, torch.ones_like(input) * clip_val, input
             )
         else:
-            output = clamp(input_tensor, 0, clip_val.data)
+            output = clamp(input, 0, clip_val.data)
         output = linear_quantize(output, scale, zero_point)
         if dequantize:
             output = linear_dequantize(output, scale, zero_point)
@@ -5288,22 +5214,20 @@ class PACT_STE_sw(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        input_tensor, clip_val = ctx.saved_tensors
-        grad_input_tensor = grad_output.clone()
-        grad_input_tensor = torch.where(
-            input_tensor >= clip_val,
-            torch.zeros_like(grad_input_tensor),
-            grad_input_tensor,
+        input, clip_val = ctx.saved_tensors
+        grad_input = grad_output.clone()
+        grad_input = torch.where(
+            input >= clip_val, torch.zeros_like(grad_input), grad_input
         )
 
         grad_alpha = grad_output.clone()
         grad_alpha = torch.where(
-            input_tensor < clip_val, torch.zeros_like(grad_alpha), grad_alpha
+            input < clip_val, torch.zeros_like(grad_alpha), grad_alpha
         )
         grad_alpha = grad_alpha.sum().expand_as(clip_val)
 
         scale = ctx.scale  # need to scale gradient if did not dequantize
-        return grad_input_tensor * scale, grad_alpha * scale, None, None, None
+        return grad_input * scale, grad_alpha * scale, None, None, None
 
 
 if Version(torch.__version__) >= Version("2.1"):
@@ -5313,6 +5237,7 @@ if Version(torch.__version__) >= Version("2.1"):
     FP16_MAX_POS = torch.finfo(torch.float16).max
     EPS = 1e-12
 
+    # from https://github.com/pytorch-labs/float8_experimental/blob/main/float8_experimental/float8_utils.py
     def to_fp8_saturated(
         x,
         float8_dtype=torch.float8_e4m3fn,
@@ -5330,22 +5255,21 @@ if Version(torch.__version__) >= Version("2.1"):
             x = x.clamp(min=-1 * E5M2_MAX_POS, max=E5M2_MAX_POS)
         if emulate:
             return x.to(float8_dtype).to(orig_dtype)
-        return x.to(float8_dtype)
+        else:
+            return x.to(float8_dtype)
 
+    # from https://github.com/pytorch-labs/float8_experimental/blob/main/float8_experimental/float8_utils.py
     def max_to_scale(
         x_max,
         float8_dtype,
         orig_dtype,
     ):
+        # NOTE scale at orig_dtype, may need to cast to different dtype if needed.
         scale = torch.empty_like(x_max, dtype=orig_dtype)
         if float8_dtype == torch.float8_e4m3fn:
             res = E4M3_MAX_POS / torch.clamp(x_max, min=EPS)
-        else:
+        else:  # e5m2
             res = E5M2_MAX_POS / torch.clamp(x_max, min=EPS)
-
-        if orig_dtype is torch.float16:
-            res = torch.clamp(res, max=torch.finfo(torch.float16).max)
-
         scale.copy_(res)
         return scale
 
@@ -5367,10 +5291,11 @@ if Version(torch.__version__) >= Version("2.1"):
             return (
                 to_fp8_saturated(x_scaled, float8_dtype, orig_dtype, emulate) / x_scale
             ).to(orig_dtype), x_scale
-        return (
-            to_fp8_saturated(x_scaled, float8_dtype, orig_dtype, emulate),
-            x_scale,
-        )
+        else:
+            return (
+                to_fp8_saturated(x_scaled, float8_dtype, orig_dtype, emulate),
+                x_scale,
+            )
 
     def to_fp8_scaled_perCh(
         x,
@@ -5391,10 +5316,11 @@ if Version(torch.__version__) >= Version("2.1"):
             return (
                 to_fp8_saturated(x_scaled, float8_dtype, orig_dtype, emulate) / x_scale
             ).to(orig_dtype), x_scale
-        return (
-            to_fp8_saturated(x_scaled, float8_dtype, orig_dtype, emulate),
-            x_scale,
-        )
+        else:
+            return (
+                to_fp8_saturated(x_scaled, float8_dtype, orig_dtype, emulate),
+                x_scale,
+            )
 
     def to_fp8_scaled_perToken(
         x,
@@ -5415,10 +5341,11 @@ if Version(torch.__version__) >= Version("2.1"):
             return (
                 to_fp8_saturated(x_scaled, float8_dtype, orig_dtype, emulate) / x_scale
             ).to(orig_dtype), x_scale
-        return (
-            to_fp8_saturated(x_scaled, float8_dtype, orig_dtype, emulate),
-            x_scale,
-        )
+        else:
+            return (
+                to_fp8_saturated(x_scaled, float8_dtype, orig_dtype, emulate),
+                x_scale,
+            )
 
     class to_fp8(nn.Module):
         def __init__(
@@ -5439,9 +5366,9 @@ if Version(torch.__version__) >= Version("2.1"):
             if "e4m3" in q_mode:
                 self.float8_dtype = torch.float8_e4m3fn
             elif "e5m2" in q_mode:
-                self.float8_dtype = torch.float8_e5m2G
+                self.float8_dtype = torch.float8_e5m2
             else:
-                raise ValueError("FP8 only supports e4m3 and e5m2")
+                raise ValueError(f"FP8 only supports e4m3 and e5m2")
             self.emulate = emulate
             self.perCh = perCh  # for weight only
             self.perToken = perToken  # for activation only
@@ -5450,7 +5377,6 @@ if Version(torch.__version__) >= Version("2.1"):
             )  # TODO need to apply scale to self scale when needed.
 
         def forward(self, x: torch.Tensor):
-            x_fp8 = None
             orig_dtype = x.dtype
             if self.perCh:
                 x_fp8, _ = to_fp8_scaled_perCh(
@@ -5488,11 +5414,13 @@ if Version(torch.__version__) >= Version("2.1"):
             return f"{self.__class__.__name__}(q_mode={self.q_mode}, emulate={self.emulate})"
 
 
-# ====================================================================================
-# FP8 casting customize to other fp behavior
+# ===============================================================================================================
+# FP8 casting customize to AIU behavior
 
-MAX_FP8_E4M3 = 448
-MAX_FP8_E5M2 = 98304
+MAX_FP8_E4M3_AIU = 448  # AIU: 1.1111.110 (same as pytorch)
+MAX_FP8_E5M2_AIU = (
+    98304  # AIU: 1.11111.10 (unlike pytorch, where non-inf max is 1.11110.11)
+)
 
 
 def custom_fp8_quantizer(
@@ -5502,14 +5430,14 @@ def custom_fp8_quantizer(
     use_subnormal: bool = False,
     scale_to_max: bool = False,
 ) -> torch.Tensor:
-    """Convert tensor tensor to FP8 format, remanining in decimal form (no binary conversion)
-    and using some clever manipulation to round each tensor values to the closest representable
+    """Convert input tensor to FP8 format, remanining in decimal form (no binary conversion)
+    and using some clever manipulation to round each input values to the closest representable
     FP8 value.
 
     Implement emulation only, always quantizing & dequantizing.
 
     Support use of subnormal or normal-only representation.
-    Support tensor "saturation" (clamped to maximum representable value) or "scale_to_max"
+    Support input "saturation" (clamped to maximum representable value) or "scale_to_max"
     (the whole tensor is scaled up or down dynamically, such that its maximum matches the
     max representable value of selected format).
 
@@ -5518,8 +5446,8 @@ def custom_fp8_quantizer(
     cast back to the original dtype."""
 
     assert bits == 8, "only 8-bit floating point supported"
-    assert mantissa_bits in (3, 2)
-    dtype_input_tensor = x.dtype
+    assert mantissa_bits == 3 or mantissa_bits == 2
+    dtype_input = x.dtype
     x = x.to(
         torch.float32
     )  # HACK: clamp can't exceed format range (e.g. maxval > fp16_maxval)
@@ -5527,7 +5455,7 @@ def custom_fp8_quantizer(
     exp_bits = bits - 1 - mantissa_bits
     bias = 2 ** (exp_bits - 1) - 1
 
-    x_max = MAX_FP8_E4M3 if mantissa_bits == 3 else MAX_FP8_E5M2
+    x_max = MAX_FP8_E4M3_AIU if mantissa_bits == 3 else MAX_FP8_E5M2_AIU
     if scale_to_max:
         stm = x_max / torch.clamp(
             x.max(), 1e-12
@@ -5551,7 +5479,7 @@ def custom_fp8_quantizer(
     )  # x = 0 -> log2 = -inf -> scales = 0
     if use_subnormal:  # PYTORCH
         scales = torch.clamp(scales, min=2 ** (1 - bias - mantissa_bits))
-    else:
+    else:  # AIU
         scales = torch.clamp(scales, min=2 ** (-bias - mantissa_bits))
 
     x_qdq = scales * torch.round(x / scales)
@@ -5559,8 +5487,8 @@ def custom_fp8_quantizer(
     if scale_to_max:
         x_qdq /= stm
     return x_qdq.to(
-        dtype_input_tensor
-    )  # NOTE: for e5m2, this will truncate back the outliers
+        dtype_input
+    )  # NOTE: for e5m2, this will truncate back the outliers (also: AIU FP16 is not IEEE FP16)
 
 
 class to_custom_fp8(nn.Module):
@@ -5571,7 +5499,7 @@ class to_custom_fp8(nn.Module):
         use_subnormal: bool = True,
         scale_to_max: bool = False,
     ):
-        """Quantizer class to convert input_tensor to FP8 (simulated).
+        """Quantizer class to convert input to FP8 (simulated).
         Support customization in the use of subnormal (enabled/disabled).
         """
         super().__init__()
@@ -5599,7 +5527,7 @@ class to_custom_fp8(nn.Module):
         return x_fp8
 
 
-# =====================================================================================
+# ===============================================================================================================
 
 
 ###for pruning
@@ -5634,15 +5562,16 @@ def mask_fc_kij(weight, group, prune_ratio=0.50):
 
 class HardPrune(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input_tensor, mask, inplace):
-        ctx.save_for_backward(input_tensor, mask)
+    def forward(ctx, input, mask, inplace):
+        ctx.save_for_backward(input, mask)
         if inplace:
-            ctx.mark_dirty(input_tensor)
+            ctx.mark_dirty(input)
         with torch.no_grad():
-            output = input_tensor.mul(mask)
+            output = input.mul(mask)
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
-        _input_tensor, mask = ctx.saved_tensors
+        input, mask = ctx.saved_tensors
+        # ctx.mark_non_differentiable(mask)
         return grad_output.mul(mask), None, None

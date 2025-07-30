@@ -47,7 +47,7 @@ if torch.cuda.is_available():
 
     def test_model_quantized(
         model_quantized: torch.nn.Module,
-        sample_input_fp32: torch.FloatTensor,
+        sample_input_fp32: torch.Tensor,
         config_fp32: dict,
     ):
         """
@@ -55,7 +55,7 @@ if torch.cuda.is_available():
 
         Args:
             model_quantized (torch.nn.Module): Quantized Toy Model
-            sample_input_fp32 (torch.FloatTensor): Sample fp32 input for calibration.
+            sample_input_fp32 (torch.Tensor): Sample fp32 input for calibration.
             config_fp32 (dict): Config w/ fp32 settings
         """
         with pytest.raises(RuntimeError):
@@ -77,7 +77,7 @@ def test_recipe_not_present(
 
 def test_double_qmodel_prep_assert(
     model_fp32: torch.nn.Module,
-    sample_input_fp32: torch.FloatTensor,
+    sample_input_fp32: torch.Tensor,
     config_fp32: dict,
 ):
     """
@@ -86,7 +86,7 @@ def test_double_qmodel_prep_assert(
 
     Args:
         model_fp32 (torch.nn.Module): Toy Model w/ fp32 data
-        sample_input_fp32 (torch.FloatTensor): Sample fp32 input for calibration
+        sample_input_fp32 (torch.Tensor): Sample fp32 input for calibration
         config_fp32 (dict): Config w/ fp32 settings
     """
     # Run qmodel_prep once
@@ -102,7 +102,7 @@ def test_double_qmodel_prep_assert(
 # Test recipe configs are working on Toy Models
 def test_config_recipes_fp32(
     model_fp32: torch.nn.Module,
-    sample_input_fp32: torch.FloatTensor,
+    sample_input_fp32: torch.Tensor,
     config_int8: dict,
 ):
     """
@@ -110,7 +110,7 @@ def test_config_recipes_fp32(
 
     Args:
         model_fp32 (torch.nn.Module): Toy Model w/ fp32 data
-        sample_input_fp32 (torch.FloatTensor): Sample fp32 input for calibration
+        sample_input_fp32 (torch.Tensor): Sample fp32 input for calibration
         config (dict): Recipe Config w/ int8 settings
     """
     qmodel_prep(model_fp32, sample_input_fp32, config_int8)
@@ -118,7 +118,7 @@ def test_config_recipes_fp32(
 
 def test_config_recipes_fp16(
     model_fp16: torch.nn.Module,
-    sample_input_fp16: torch.FloatTensor,
+    sample_input_fp16: torch.Tensor,
     config_int8: dict,
 ):
     """
@@ -126,7 +126,7 @@ def test_config_recipes_fp16(
 
     Args:
         model_fp16 (torch.nn.Module): Toy Model w/ fp16 data
-        sample_input_fp16 (torch.FloatTensor): Sample fp16 input for calibration
+        sample_input_fp16 (torch.Tensor): Sample fp16 input for calibration
         config (dict): Recipe Config w/ int8 settings
     """
     qmodel_prep(model_fp16, sample_input_fp16, config_int8)
@@ -134,7 +134,7 @@ def test_config_recipes_fp16(
 
 def test_config_fp32_qmodes(
     model_config_fp32: torch.nn.Module,
-    sample_input_fp32: torch.FloatTensor,
+    sample_input_fp32: torch.Tensor,
     config_int8: dict,
     qa_mode: str,
     qw_mode: str,
@@ -144,7 +144,7 @@ def test_config_fp32_qmodes(
 
     Args:
         model_config_fp32 (torch.nn.Module): Toy Model w/ fp32 data
-        sample_input_fp32 (torch.FloatTensor): Sample fp32 input for calibration
+        sample_input_fp32 (torch.Tensor): Sample fp32 input for calibration
         config (dict): Recipe Config w/ int8 settings
         qa_mode (str): Activation quantizer
         qw_mode (str): Weight quantizer
@@ -165,7 +165,7 @@ def test_config_fp32_qmodes(
 )
 def test_resnet50_torchscript(
     model_resnet,
-    batch_resnet: torch.FloatTensor,
+    batch_resnet: torch.Tensor,
     config_int8: dict,
 ):
     """
@@ -173,7 +173,7 @@ def test_resnet50_torchscript(
 
     Args:
         model_resnet (torchvision.models.resnet.ResNet): Resnet50 model + weights
-        batch_resnet (torch.FloatTensor): Batch image data for Resnet50
+        batch_resnet (torch.Tensor): Batch image data for Resnet50
         config (dict): Recipe Config w/ int8 settings
     """
     # Run qmodel_prep w/ default torchscript tracer
@@ -187,7 +187,7 @@ def test_resnet50_torchscript(
 )
 def test_resnet50_dynamo(
     model_resnet,
-    batch_resnet: torch.FloatTensor,
+    batch_resnet: torch.Tensor,
     config_int8: dict,
 ):
     """
@@ -195,7 +195,7 @@ def test_resnet50_dynamo(
 
     Args:
         model_resnet (torchvision.models.resnet.ResNet): Resnet50 model + weights
-        batch_resnet (torch.FloatTensor): Batch image data for Resnet50
+        batch_resnet (torch.Tensor): Batch image data for Resnet50
         config (dict): Recipe Config w/ int8 settings
     """
     # Run qmodel_prep w/ Dynamo tracer
@@ -209,7 +209,7 @@ def test_resnet50_dynamo(
 )
 def test_resnet50_dynamo_layers(
     model_resnet,
-    batch_resnet: torch.FloatTensor,
+    batch_resnet: torch.Tensor,
     config_int8: dict,
 ):
     """
@@ -218,7 +218,7 @@ def test_resnet50_dynamo_layers(
 
     Args:
         model_resnet (torchvision.models.resnet.ResNet): Resnet50 model + weights
-        batch_resnet (torch.FloatTensor): Batch image data for Resnet50
+        batch_resnet (torch.Tensor): Batch image data for Resnet50
         config (dict): Recipe Config w/ int8 settings
     """
     # Run qmodel_prep w/ qlayer_name_pattern + Dynamo tracer
@@ -234,7 +234,7 @@ def test_resnet50_dynamo_layers(
 )
 def test_vit_torchscript(
     model_vit,
-    batch_vit: torch.FloatTensor,
+    batch_vit: torch.Tensor,
     config_int8: dict,
 ):
     """
@@ -242,7 +242,7 @@ def test_vit_torchscript(
 
     Args:
         model_vit (torchvision.models.vision_transformer.VisionTransformer): ViT model + weights
-        batch_vit (torch.FloatTensor): Batch image data for ViT
+        batch_vit (torch.Tensor): Batch image data for ViT
         config (dict): Recipe Config w/ int8 settings
     """
     # Run qmodel_prep w/ default torchscript tracer
@@ -256,7 +256,7 @@ def test_vit_torchscript(
 )
 def test_vit_dynamo(
     model_vit,
-    batch_vit: torch.FloatTensor,
+    batch_vit: torch.Tensor,
     config_int8: dict,
 ):
     """
@@ -264,7 +264,7 @@ def test_vit_dynamo(
 
     Args:
         model_vit (torchvision.models.vision_transformer.VisionTransformer): ViT model + weights
-        batch_vit (torch.FloatTensor): Batch image data for ViT
+        batch_vit (torch.Tensor): Batch image data for ViT
         config (dict): Recipe Config w/ int8 settings
     """
     # Run qmodel_prep w/ Dynamo tracer
@@ -282,7 +282,7 @@ def test_resnet18(
 
     Args:
         model_resnet18 (AutoModelForImageClassification): Resnet18 model + weights
-        batch_resnet18 (torch.FloatTensor): Batch image data for Resnet18
+        batch_resnet18 (torch.Tensor): Batch image data for Resnet18
         config (dict): Recipe Config w/ int8 settings
     """
     # Run qmodel_prep w/ Dynamo tracer
@@ -300,7 +300,7 @@ def test_vit_base(
 
     Args:
         model_vit_base (AutoModelForImageClassification): Resnet18 model + weights
-        batch_vit_base (torch.FloatTensor): Batch image data for Resnet18
+        batch_vit_base (torch.Tensor): Batch image data for Resnet18
         config (dict): Recipe Config w/ int8 settings
     """
     # Run qmodel_prep w/ Dynamo tracer
@@ -310,7 +310,7 @@ def test_vit_base(
 
 def test_bert_dynamo(
     model_bert: transformers.models.bert.modeling_bert.BertModel,
-    input_bert: torch.FloatTensor,
+    input_bert: torch.Tensor,
     config_int8: dict,
 ):
     """
@@ -318,7 +318,7 @@ def test_bert_dynamo(
 
     Args:
         model_bert (transformers.models.bert.modeling_bert.BertModel): BERT model + weights
-        input_bert (torch.FloatTensor): Tokenized input for BERT
+        input_bert (torch.Tensor): Tokenized input for BERT
         config (dict): Recipe Config w/ int8 settings
     """
     # Run qmodel_prep w/ Dynamo tracer
@@ -328,7 +328,7 @@ def test_bert_dynamo(
 
 def test_bert_dynamo_wi_qbmm(
     model_bert_eager: transformers.models.bert.modeling_bert.BertModel,
-    input_bert: torch.FloatTensor,
+    input_bert: torch.Tensor,
     config_int8: dict,
 ):
     """
@@ -345,7 +345,7 @@ def test_bert_dynamo_wi_qbmm(
 
     Args:
         model_bert (transformers.models.bert.modeling_bert.BertModel): BERT model + weights
-        input_bert (torch.FloatTensor): Tokenized input for BERT
+        input_bert (torch.Tensor): Tokenized input for BERT
         config (dict): Recipe Config w/ int8 settings
     """
     config_int8["nbits_bmm1"] = 8

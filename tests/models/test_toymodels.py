@@ -63,7 +63,7 @@ def test_subclass():
 
 def test_first_layer_unchanged_fp32(
     model_fp32: torch.nn.Module,
-    sample_input_fp32: torch.FloatTensor,
+    sample_input_fp32: torch.Tensor,
     config_fp32: dict,
 ):
     """
@@ -71,7 +71,7 @@ def test_first_layer_unchanged_fp32(
 
     Args:
         model_fp32 (torch.nn.Module): Toy Model w/ fp32 data
-        sample_input_fp32 (torch.FloatTensor): Sample fp32 input for calibration.
+        sample_input_fp32 (torch.Tensor): Sample fp32 input for calibration.
         config_fp32 (dict): Config w/ fp32 settings
     """
     # Grab copy of first layer before quantization
@@ -103,7 +103,7 @@ def test_first_layer_unchanged_fp32(
 
 def test_first_layer_unchanged_fp16(
     model_fp16: torch.nn.Module,
-    sample_input_fp16: torch.FloatTensor,
+    sample_input_fp16: torch.Tensor,
     config_fp16: dict,
 ):
     """
@@ -111,7 +111,7 @@ def test_first_layer_unchanged_fp16(
 
     Args:
         model_fp16 (torch.nn.Module): Toy Model w/ fp16 data
-        sample_input_fp16 (torch.FloatTensor): Sample fp16 input for calibration.
+        sample_input_fp16 (torch.Tensor): Sample fp16 input for calibration.
         config_fp16 (dict): Config w/ fp16 settings
     """
     # Grab copy of first layer before quantization
@@ -141,7 +141,7 @@ def test_first_layer_unchanged_fp16(
 
 def test_second_layer_quantized_fp32(
     model_fp32: torch.nn.Module,
-    sample_input_fp32: torch.FloatTensor,
+    sample_input_fp32: torch.Tensor,
     config_fp32: dict,
 ):
     """
@@ -154,7 +154,7 @@ def test_second_layer_quantized_fp32(
 
     Args:
         model_fp32 (torch.nn.Module): Toy Model w/ fp32 data
-        sample_input_fp32 (torch.FloatTensor): Sample fp32 input for calibration.
+        sample_input_fp32 (torch.Tensor): Sample fp32 input for calibration.
         config_fp32 (dict): Config w/ fp32 settings
     """
     if hasattr(model_fp32, "second_layer"):
@@ -202,7 +202,7 @@ def test_second_layer_quantized_fp32(
 
 def test_second_layer_quantized_fp16(
     model_fp16: torch.nn.Module,
-    sample_input_fp16: torch.FloatTensor,
+    sample_input_fp16: torch.Tensor,
     config_fp16: dict,
 ):
     """
@@ -215,7 +215,7 @@ def test_second_layer_quantized_fp16(
 
     Args:
         model_fp16 (torch.nn.Module): Toy Model w/ fp32 data
-        sample_input_fp16 (torch.FloatTensor): Sample fp16 input for calibration.
+        sample_input_fp16 (torch.Tensor): Sample fp16 input for calibration.
         config_fp16 (dict): Config w/ fp16 settings
     """
     if hasattr(model_fp16, "second_layer"):
@@ -263,7 +263,7 @@ def test_second_layer_quantized_fp16(
 
 def test_qmodel_prep_output_fp32(
     model_fp32: torch.nn.Module,
-    sample_input_fp32: torch.FloatTensor,
+    sample_input_fp32: torch.Tensor,
     config_fp32: dict,
 ):
     """
@@ -271,7 +271,7 @@ def test_qmodel_prep_output_fp32(
 
     Args:
         model_fp32 (torch.nn.Module): Toy Model w/ fp32 data
-        sample_input_fp32 (torch.FloatTensor): Sample fp32 input for calibration.
+        sample_input_fp32 (torch.Tensor): Sample fp32 input for calibration.
         config_fp32 (dict): Config w/ fp32 settings
     """
     # need to detach to make deepcopy
@@ -288,7 +288,7 @@ def test_qmodel_prep_output_fp32(
 
 def test_qmodel_prep_output_fp16(
     model_fp16: torch.nn.Module,
-    sample_input_fp16: torch.FloatTensor,
+    sample_input_fp16: torch.Tensor,
     config_fp16: dict,
 ):
     """
@@ -296,7 +296,7 @@ def test_qmodel_prep_output_fp16(
 
     Args:
         model_fp16 (torch.nn.Module): Toy Model w/ fp16 data
-        sample_input_fp16 (torch.FloatTensor): Sample fp16 input for calibration.
+        sample_input_fp16 (torch.Tensor): Sample fp16 input for calibration.
         config_fp16 (dict): Config w/ fp16 settings
     """
     # need to detach to make deepcopy
@@ -311,7 +311,7 @@ def test_qmodel_prep_output_fp16(
 
 def test_qmodel_prep_num_bits_output_fp32(
     model_fp32: torch.nn.Module,
-    sample_input_fp32: torch.FloatTensor,
+    sample_input_fp32: torch.Tensor,
     num_bits_activation_fp32: int,
     num_bits_weight_fp32: int,
     config_fp32: dict,
@@ -321,7 +321,7 @@ def test_qmodel_prep_num_bits_output_fp32(
 
     Args:
         model_fp32 (torch.nn.Module): Toy Model w/ fp32 data
-        sample_input_fp32 (torch.FloatTensor): Sample fp32 input for calibration.
+        sample_input_fp32 (torch.Tensor): Sample fp32 input for calibration.
         num_bits_activation_fp32 (int): nbits_a valid for fp32
         num_bits_weight_fp32 (int): nbits_w valid for fp32
         config_fp32 (dict): Config w/ fp32 settings
@@ -377,7 +377,7 @@ def test_qmodel_prep_num_bits_output_fp32(
 
 def test_qmodel_prep_num_bits_output_fp16(
     model_fp16: torch.nn.Module,
-    sample_input_fp16: torch.FloatTensor,
+    sample_input_fp16: torch.Tensor,
     num_bits_activation_fp16: int,
     num_bits_weight_fp16: int,
     config_fp16: dict,
@@ -387,7 +387,7 @@ def test_qmodel_prep_num_bits_output_fp16(
 
     Args:
         model_fp16 (torch.nn.Module): Toy Model w/ fp16 data
-        sample_input_fp16 (torch.FloatTensor): Sample fp16 input for calibration.
+        sample_input_fp16 (torch.Tensor): Sample fp16 input for calibration.
         num_bits_activation_fp16 (int): nbits_a valid for fp16
         num_bits_weight_fp16 (int): nbits_w valid for fp16
         config_fp16 (dict): Config w/ fp16 settings
