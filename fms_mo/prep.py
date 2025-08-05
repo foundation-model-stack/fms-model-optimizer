@@ -570,7 +570,42 @@ def has_quantized_module(model):
     """Check if model is already quantized - do not want to quantize twice if so"""
     return any(isinstance(m, quantized_modules) for m in model.modules())
 
+def swap_qbmm(model: nn.Module, qcfg: dict):
+    """Go through all model.named_modules(), try to create an equivalent Qbmm layer to replace each of
+    the existing linear Bmm layers.
 
+    Args:
+        model (nn.Module): input model to be "prepared"
+        qcfg (dict): quant config
+
+    Returns: updated model is returned with the Qbmm added
+        
+    """
+
+    from fms_mo.modules import QBmm
+
+    qcfg["which2patch_contextmanager"] = qcfg["bmm_prep"][
+        "which2patch_contextmanager"
+    ]
+    isbmm = qcfg["which2patch_contextmanager"] == "torch.bmm"
+    for mod_name, line_nums in qcfg["bmm_prep"]["layers_with_bmm"].items():
+        mod_bmm_happened = model.get_submodule(mod_name)
+        for whichQBmm, ln in enumerate(line_nums, start=1):
+            nbits = qcfg[f"nbits_bmm{whichQBmm}"]
+            newQBmm = QBmm(
+                num_bits_m1=max(nbits, 8) if whichQBmm == 2 else nbits,
+                num_bits_m2=nbits,
+                qm1_mode=qcfg[f"bmm{whichQBmm}_qm1_mode"],
+                qm2_mode=qcfg[f"bmm{whichQBmm}_qm2_mode"],
+                m1_unidirectional=(whichQBmm == 2),
+                m1_bounded=(whichQBmm == 2),  # see Note 5
+                m2_unidirectional=False,
+                m2_bounded=False,
+                replaceBmm=isbmm,
+                qcfg=qcfg,
+            )
+            setattr(mod_bmm_happened, f"QBmm{ln}", newQBmm)
+            
 def qmodel_prep(
     model,
     dloader,
@@ -582,7 +617,9 @@ def qmodel_prep(
     Qcali=False,
     dev=None,
     use_dynamo=False,
+    mode=False,
     verbose=False,
+    folder=None,
     **kwargs,
 ):
     """Prepare a given PyTorch model for quantization process through three parts:
@@ -657,7 +694,14 @@ def qmodel_prep(
     Returns:
         nn.Module: quantized model ready for further PTQ/QAT
     """
+    if mode:
+        
+        if qcfg.get("QBmm"): 
+            swap_qbmm(model,qcfg)
 
+        model = q_any_net_5(model, qcfg, verbose = False)
+        return model
+    
     sys.setrecursionlimit(4000)
 
     currDev = next(model.parameters()).device if dev is None else dev
@@ -907,7 +951,7 @@ def qmodel_prep(
             model, device_ids=DPorDDPdevices
         )
 
-    qconfig_save(qcfg, fname="qcfg.json")
+    qconfig_save(qcfg, fname=folder+"/qcfg.json")
     qcfg["tb_writer"] = tb_writer
 
     logger.info(f"--- Quantized model --- \n{model}\n")

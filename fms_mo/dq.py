@@ -50,6 +50,8 @@ from fms_mo.utils.aiu_utils import save_for_aiu
 from fms_mo.utils.dq_utils import config_quantize_smooth_layers
 from fms_mo.utils.eval_utils import Evaluator, eval_llm_1GPU
 from fms_mo.utils.utils import patch_torch_bmm, prepare_input
+from fms_mo.utils.dq_inf import load_fp8_vllm, save_vllm_fp8
+from accelerate import load_checkpoint_and_dispatch
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +136,11 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
     logger.info(f"Initialized model is: \n {model}")
     logger.info(f"Model is at {model.device} after intialization")
     logger.info(f"Tokenizer is {tokenizer}, block size is {block_size}")
-    qcfg = qconfig_init(recipe="dq", args=fms_mo_args)
+    
+    if not fms_mo_args.inference or fms_mo_args.vllm_fp8_load:
+        qcfg = qconfig_init(recipe="dq", args=fms_mo_args)
+    else:
+        qcfg = qconfig_init(recipe=opt_args.output_dir+"/qcfg")
 
     model_size = model_size_Wb(model, unit="GB")
     gpu_mem_util_per = model_size / total_gpu_memory
@@ -190,7 +196,7 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
     )
 
     # For loading or creating smoothquant scale. Sometimes we may include scales in ckpt as well.
-    if qcfg["smoothq"]:
+    if not fms_mo_args.inference and qcfg["smoothq"] :
         scale_file = Path(f"./act_scales/{qcfg['model'].replace('/', '-')}.pt")
         if qcfg.get("act_scale_path", None):
             # user provided a scale file (or a dir)
@@ -224,53 +230,76 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
             use_layer_name_pattern_matching=use_layer_name_pattern_matching,
             use_dynamo=use_dynamo,
             dev=dev,
+            mode=fms_mo_args.inference,
             save_fname="dq",
+            folder=opt_args.output_dir,
         )
         logger.info(f"Quantized model {model}")
         logger.info("==" * 20)
 
-    if qcfg["smoothq"]:
-        logger.info("Starting to apply smooth scale")
-        dq_llm(model, act_scales, qcfg)
-        logger.info("Finished applying smooth scale")
+    if not fms_mo_args.inference:
+        if qcfg["smoothq"]:
+            logger.info("Starting to apply smooth scale")
+            dq_llm(model, act_scales, qcfg)
+            logger.info("Finished applying smooth scale")
 
-    if qcfg["qmodel_calibration_new"] > 0:
-        logger.info("Starting to calibrate activation clip_val")
-        if qcfg["large_model"]:
-            calibration_llm_1GPU_v2(qcfg, model, dq_dataloader)
-        else:
-            model.to("cuda")
-            pbar = tqdm(
-                dq_dataloader,
-                desc=" calibration after applying smoothq scale and before inference",
-                total=qcfg["qmodel_calibration_new"],
+        if qcfg["qmodel_calibration_new"] > 0:
+            logger.info("Starting to calibrate activation clip_val")
+            if qcfg["large_model"]:
+                calibration_llm_1GPU_v2(qcfg, model, dq_dataloader)
+            else:
+                model.to("cuda")
+                pbar = tqdm(
+                    dq_dataloader,
+                    desc=" calibration after applying smoothq scale and before inference",
+                    total=qcfg["qmodel_calibration_new"],
+                )
+                for data_mb, _ in zip(pbar, range(qcfg["qmodel_calibration_new"])):
+                    data_mb = prepare_input(model.device, data_mb)
+                    with patch_torch_bmm(qcfg):
+                        model(**data_mb)
+
+        if opt_args.save_ckpt_for_aiu:
+            logger.info(
+                f"Saving model processed for AIU and tokenizer to {opt_args.output_dir}"
             )
-            for data_mb, _ in zip(pbar, range(qcfg["qmodel_calibration_new"])):
-                data_mb = prepare_input(model.device, data_mb)
-                with patch_torch_bmm(qcfg):
-                    model(**data_mb)
+            save_for_aiu(model, qcfg, output_dir=opt_args.output_dir, verbose=True)
+        elif opt_args.save_ckpt_for_vllm:
+            logger.info(
+                f"Saving model processed for vLLM and tokenizer to {opt_args.output_dir}"
+            )
+            save_vllm_fp8(model,qcfg,tokenizer,opt_args.output_dir)
+        elif opt_args.save_ckpt:
+            logger.info(
+                f"Saving quantized model and tokenizer to {opt_args.output_dir}"
+                )
+            model.save_pretrained(opt_args.output_dir, use_safetensors=True)
+            tokenizer.save_pretrained(opt_args.output_dir)
 
-    if opt_args.save_ckpt_for_aiu:
-        logger.info(
-            f"Saving model processed for AIU and tokenizer to {opt_args.output_dir}"
-        )
-        save_for_aiu(model, qcfg, output_dir=opt_args.output_dir, verbose=True)
-    elif opt_args.save_ckpt:
-        logger.info(f"Saving quantized model and tokenizer to {opt_args.output_dir}")
-        model.save_pretrained(opt_args.output_dir, use_safetensors=True)
-        tokenizer.save_pretrained(opt_args.output_dir)
+        if fms_mo_args.aiu_sim_triton:
+            # NOTE plz apply correct HW settings here, defaults are not real HW params
+            lower_qmodel_triton(
+                model,
+                use_dyn_max_act=-1 if qcfg["qa_mode"] == "pertokenmax" else False,
+                max_acc_bits=qcfg.get("max_acc_bits", 32),
+                num_lsb_to_truncate=qcfg.get("lsb_trun_bits", 0),
+                chunk_size=qcfg.get("chunk_size", 32),  # 1024
+                clamp_acc_to_dl16=fms_mo_args.aiu_sim_triton == "fp8",
+                # layer_to_exclude=["lm_head",]
+            )
+    else:
+        if fms_mo_args.vllm_fp8_load:
+            logger.info("loading llmcompressor fp8 model saved_checkpoint")
+            model = load_fp8_vllm( model=model, checkpoint=opt_args.output_dir)
 
-    if fms_mo_args.aiu_sim_triton:
-        # NOTE plz apply correct HW settings here, defaults are not real HW params
-        lower_qmodel_triton(
-            model,
-            use_dyn_max_act=-1 if qcfg["qa_mode"] == "pertokenmax" else False,
-            max_acc_bits=qcfg.get("max_acc_bits", 32),
-            num_lsb_to_truncate=qcfg.get("lsb_trun_bits", 0),
-            chunk_size=qcfg.get("chunk_size", 32),  # 1024
-            clamp_acc_to_dl16=fms_mo_args.aiu_sim_triton == "fp8",
-            # layer_to_exclude=["lm_head",]
-        )
+        else:
+            logger.info("loading dq fms_mo fp8 model saved_checkpoint")
+            model = load_checkpoint_and_dispatch( 
+                model,
+                checkpoint=opt_args.output_dir,
+                device_map=None,
+                no_split_module_classes=['Block']
+            )
 
     if fms_mo_args.eval_ppl:
         path_test = Path(data_args.test_data_path)

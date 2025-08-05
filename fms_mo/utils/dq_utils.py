@@ -74,7 +74,7 @@ def config_quantize_smooth_layers(qcfg: dict):
             for llama_family, layers in large_mag_layers.items():
                 if llama_family in qcfg["model"]:
                     qcfg["qskip_layer_name"] += [
-                        f"model.layers.{i}.mlp.down_proj" for i in layers
+                        f"model.layers.{i}.mlp.down_projj" for i in layers
                     ]
                     break
     elif any(model in qcfg["model"] for model in granite_architecture) or any(
