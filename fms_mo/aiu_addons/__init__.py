@@ -43,7 +43,7 @@ def _infer_quantization_config(quant_config: dict) -> dict | None:
                 for ignored_layer in quant_config["ignore"]:
                     assert isinstance(ignored_layer, str)
                     fms_ign_layer = translations.get(ignored_layer, ignored_layer)
-                    if name in fms_ign_layer:
+                    if name and name in fms_ign_layer:
                         return "torch_linear"
                 for pattern in quant_config["config_groups"]["group_0"]["targets"]:
                     # Special case from llm-compressor that covers all linear layers
