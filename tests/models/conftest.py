@@ -382,10 +382,10 @@ class ToyModel1(torch.nn.Module):
         Forward func for Toy Model
 
         Args:
-            input_tensor (torch.FloatTensor): Tensor to operate on
+            input_tensor (torch.Tensor): Tensor to operate on
 
         Returns:
-            torch.FloatTensor:
+            torch.Tensor:
         """
         return self.first_layer(input_tensor)
 
@@ -402,15 +402,15 @@ class ToyModel2(torch.nn.Module):
         super().__init__()
         self.first_layer = torch.nn.Linear(3, 3, bias=True)
 
-    def forward(self, input_tensor: torch.FloatTensor):
+    def forward(self, input_tensor: torch.Tensor):
         """
         Forward func for Toy Model
 
         Args:
-            input_tensor (torch.FloatTensor): Tensor to operate on
+            input_tensor (torch.Tensor): Tensor to operate on
 
         Returns:
-            torch.FloatTensor:
+            torch.Tensor:
         """
         return self.first_layer(input_tensor)
 
@@ -434,10 +434,10 @@ class ToyModel3(torch.nn.Module):
         Forward func for Toy Model
 
         Args:
-            input_tensor (torch.FloatTensor): Tensor to operate on
+            input_tensor (torch.Tensor): Tensor to operate on
 
         Returns:
-            torch.FloatTensor:
+            torch.Tensor:
         """
         out = self.first_layer(input_tensor)
         out = self.second_layer(out)
@@ -466,10 +466,10 @@ class ToyModel4(torch.nn.Module):
         Forward func for Toy Model
 
         Args:
-            input_tensor (torch.FloatTensor): Tensor to operate on
+            input_tensor (torch.Tensor): Tensor to operate on
 
         Returns:
-            torch.FloatTensor:
+            torch.Tensor:
         """
         out = self.first_layer(input_tensor)
         out = self.relu(out)
@@ -580,10 +580,10 @@ if torch.cuda.is_available():
             Forward func for Toy Model
 
             Args:
-                input_tensor (torch.FloatTensor): Tensor to operate on
+                input_tensor (torch.Tensor): Tensor to operate on
 
             Returns:
-                torch.FloatTensor:
+                torch.Tensor:
             """
             out = self.first_layer(input_tensor)
             out = self.second_layer(out)
@@ -627,10 +627,10 @@ class ToyModelNoUniqueLayers(torch.nn.Module):
         Forward func for Toy Model
 
         Args:
-            input_tensor (torch.FloatTensor): Tensor to operate on
+            input_tensor (torch.Tensor): Tensor to operate on
 
         Returns:
-            torch.FloatTensor:
+            torch.Tensor:
         """
         out = self.first_layer(input_tensor)
         out = self.second_layer(out)
@@ -674,10 +674,10 @@ class ToyModelHalf(torch.nn.Module):
         Forward func for Toy Model
 
         Args:
-            input_tensor (torch.FloatTensor): Tensor to operate on
+            input_tensor (torch.Tensor): Tensor to operate on
 
         Returns:
-            torch.FloatTensor:
+            torch.Tensor:
         """
         out = self.first_layer(input_tensor)
         out = self.second_layer(out)
@@ -723,10 +723,10 @@ def sample_input_fp32(request):
     Sample input fp32 data
 
     Args:
-        request (torch.FloatTensor): fp32 data
+        request (torch.Tensor): fp32 data
 
     Returns:
-        torch.FloatTensor: fp32 data
+        torch.Tensor: fp32 data
     """
     return request.param
 
@@ -737,10 +737,10 @@ def sample_input_fp16(request):
     Sample input fp16 data
 
     Args:
-        request (torch.FloatTensor): fp16 data
+        request (torch.Tensor): fp16 data
 
     Returns:
-        torch.FloatTensor: fp16 data
+        torch.Tensor: fp16 data
     """
     return request.param
 
@@ -1151,11 +1151,11 @@ if available_packages["torchvision"]:
         Preprocess an image w/ a weights.transform()
 
         Args:
-            img_tv (torch.FloatTensor): Image data
+            img_tv (torch.Tensor): Image data
             weights (torchvision.models): Weight object
 
         Returns:
-            torch.FloatTensor: Preprocessed image
+            torch.Tensor: Preprocessed image
         """
         preprocess = weights.transforms()
         batch = preprocess(image).unsqueeze(0)
@@ -1167,7 +1167,7 @@ if available_packages["torchvision"]:
         Preprocess an image w/ Resnet weights.transform()
 
         Returns:
-            torch.FloatTensor: Preprocessed image
+            torch.Tensor: Preprocessed image
         """
         return prepocess_img(img_tv, ResNet50_Weights.IMAGENET1K_V2)
 
@@ -1177,7 +1177,7 @@ if available_packages["torchvision"]:
         Preprocess an image w/ ViT weights.transform()
 
         Returns:
-            torch.FloatTensor: Preprocessed image
+            torch.Tensor: Preprocessed image
         """
         return prepocess_img(img_tv, ViT_B_16_Weights.IMAGENET1K_V1)
 
@@ -1223,7 +1223,7 @@ def process_img(
         input_img (Image.Image): Image data
 
     Returns:
-        torch.FloatTensor: Processed image
+        torch.Tensor: Processed image
     """
     img_processor = AutoImageProcessor.from_pretrained(pretrained_model, use_fast=True)
     batch_dict = img_processor(images=input_img, return_tensors="pt")
@@ -1236,7 +1236,7 @@ def batch_resnet18():
     Preprocess an image w/ ms resnet18 processor
 
     Returns:
-        torch.FloatTensor: Preprocessed image
+        torch.Tensor: Preprocessed image
     """
     return process_img("microsoft/resnet-18", img)
 
@@ -1258,7 +1258,7 @@ def batch_vit_base():
     Preprocess an image w/ Google ViT-base processor
 
     Returns:
-        torch.FloatTensor: Preprocessed image
+        torch.Tensor: Preprocessed image
     """
     return process_img("google/vit-base-patch16-224", img)
 
@@ -1287,7 +1287,7 @@ def input_bert():
     Create a BERT input
 
     Returns:
-        torch.FloatTensor: BERT sample input
+        torch.Tensor: BERT sample input
     """
     text = "Replace me by any text you'd like."
     tokenizer = BertTokenizer.from_pretrained("google-bert/bert-base-uncased")
@@ -1381,7 +1381,7 @@ def input_residualMLP():
     Get a random input for a residual MLP model
 
     Returns:
-        torch.FloatTensor: Random 16x128 tensor
+        torch.Tensor: Random 16x128 tensor
     """
     x = np.random.randn(16, 128)
     return torch.tensor(x, dtype=torch.float32, device="cuda")

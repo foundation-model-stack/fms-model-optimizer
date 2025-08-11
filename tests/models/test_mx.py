@@ -115,7 +115,7 @@ def test_config_mx_error(
 )
 def test_residualMLP(
     model_residualMLP: torch.nn.Module,
-    input_residualMLP: torch.FloatTensor,
+    input_residualMLP: torch.Tensor,
     config_fp32_mx_specs: dict,
     mx_format: str,
 ):
@@ -124,7 +124,7 @@ def test_residualMLP(
 
     Args:
         model_residualMLP (torch.nn.Module): Single fp32 model.
-        input_residualMLP (torch.FloatTensor): Random 16x128 tensor.
+        input_residualMLP (torch.Tensor): Random 16x128 tensor.
         config_fp32_mx_specs (dict): Config for fp32 quantization w/ mx_specs.
         mx_format (str): MX format for quantization.
     """
@@ -158,7 +158,7 @@ def test_residualMLP(
 )
 def test_mx_specs_after_qconfig_init(
     model_residualMLP: torch.nn.Module,
-    input_residualMLP: torch.FloatTensor,
+    input_residualMLP: torch.Tensor,
     config_fp32: dict,
 ):
     """
@@ -166,7 +166,7 @@ def test_mx_specs_after_qconfig_init(
 
     Args:
         model_residualMLP (torch.nn.Module): Single fp32 model.
-        input_residualMLP (torch.FloatTensor): Random 16x128 tensor.
+        input_residualMLP (torch.Tensor): Random 16x128 tensor.
         config_fp32 (dict): Config w/ fp32 settings.
     """
     config_fp32["qa_mode"] = "mx_fp8_e5m2"

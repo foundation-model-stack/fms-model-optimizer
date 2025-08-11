@@ -17,6 +17,9 @@ qcfg.json
 configs
 pytest.out
 
+# Log file
+fms_mo.log
+
 # IDEs
 .vscode/
 .idea/
