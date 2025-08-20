@@ -29,6 +29,7 @@ if available_packages["fms"]:
     # Third Party
     from fms.modules.attention import (
         AttentionKwargs,
+        _sdpa_compute_op,
         _sdpa_update_attn_kwargs,
         register_attention_op,
     )
@@ -219,8 +220,9 @@ if available_packages["fms"]:
                 .to(dtype=orig_dtype)
                 .transpose(-2, -1)
             )
-            attn_weight = query @ key_t
-            attn_weight *= scale_factor
+            attn_weight = (query * math.sqrt(scale_factor)) @ (
+                key_t * math.sqrt(scale_factor)
+            )
         attn_weight += attn_bias
         attn_weight = torch.softmax(attn_weight, dim=-1)
         attn_weight = torch.dropout(attn_weight, p_dropout, train=True)
@@ -340,7 +342,7 @@ if available_packages["fms"]:
     register_attention_op(
         "spyre_paged_attn_fp8",
         _spyre_scaled_paged_store_op,
-        compute_op=_math_fp8_compute_op,
+        compute_op=_sdpa_compute_op,
         is_prefill_op=lambda **attn_kwargs: attn_kwargs.get("block_table", None)
         is None,
         compute_decode_op=_spyre_scaled_paged_compute_op,

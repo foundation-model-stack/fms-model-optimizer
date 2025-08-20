@@ -321,12 +321,12 @@ if available_packages["fms"] and available_packages["torchao"]:
         sharding  | param          | shard | dim |
         ----------+----------------+-------+-----|
         colwise   | weight         |   Y   |  0  |
-                  | weight_scale   |   N   |  -  |
+                  | weight_scale   |  Y/N  | 0/- |
                   | input_scale    |   N   |  -  |
                   | bias           |   Y   |  0  |
         ----------+----------------+-------+-----|
         rowwise   | weight         |   Y   |  1  |
-                  | weight_scale   |  Y/N  | 0/- |
+                  | weight_scale   |   N   |  -  |
                   | input_scale    |  Y/N  | 0/- |
                   | bias           |   0   |  -  |
         """
@@ -339,7 +339,7 @@ if available_packages["fms"] and available_packages["torchao"]:
             ]
             # Scales are per-row or per-tensor
             # Only sharding needed when row parallel and per-row
-            shard_scales = weight_strategy != "tensor" and module_info.sharding_dim == 1
+            shard_scales = weight_strategy != "tensor" and module_info.sharding_dim == 0
             params: dict[str, LinearParameterShardingInfo] = {
                 "weight": LinearParameterShardingInfo(
                     module_info.sharding_dim, ShardType.SHARD
