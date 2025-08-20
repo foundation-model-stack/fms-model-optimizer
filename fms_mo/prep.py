@@ -23,7 +23,7 @@ import warnings
 # Third Party
 from torch import nn
 import torch
-
+import compressed_tensors
 # Local
 from fms_mo.calib import qmodel_calib
 from fms_mo.modules import QBmm_modules, QConv2d_modules, QLinear_modules, QLSTM_modules
@@ -391,12 +391,14 @@ def make_quant_module(module, curr_full_name, qcfg, verbose=False):
     # For nn.Linear
     elif isinstance(module, nn.Linear):
         if module.__class__ != nn.Linear:
-            logger.warning(
-                f"{curr_full_name} {type(module)} seems to be a wrapper of Linear."
-                "Please make sure it doesn't wrap BN and activ func."
-                "Otherwise please create an equivalen Linear wrapper and change qcfg['mapping']."
-            )
-
+            if isinstance(module, compressed_tensors.linear.compressed_linear.CompressedLinear):
+                pass
+            else:
+                logger.warning(
+                    f"{curr_full_name} {type(module)} seems to be a wrapper of Linear."
+                    "Please make sure it doesn't wrap BN and activ func."
+                    "Otherwise please create an equivalen Linear wrapper and change qcfg['mapping']."
+                    )
         QLin = mapping.get(nn.Linear, None)
         if QLin is None:
             if verbose:
@@ -571,8 +573,8 @@ def has_quantized_module(model):
     return any(isinstance(m, quantized_modules) for m in model.modules())
 
 def swap_qbmm(model: nn.Module, qcfg: dict):
-    """Go through all model.named_modules(), try to create an equivalent Qbmm layer to replace each of
-    the existing linear Bmm layers.
+    """Go through all model.named_modules(), try to create an equivalent
+    Qbmm layer to replace each of the existing linear Bmm layers.
 
     Args:
         model (nn.Module): input model to be "prepared"
@@ -605,7 +607,7 @@ def swap_qbmm(model: nn.Module, qcfg: dict):
                 qcfg=qcfg,
             )
             setattr(mod_bmm_happened, f"QBmm{ln}", newQBmm)
-            
+
 def qmodel_prep(
     model,
     dloader,
@@ -619,7 +621,6 @@ def qmodel_prep(
     use_dynamo=False,
     mode=False,
     verbose=False,
-    folder=None,
     **kwargs,
 ):
     """Prepare a given PyTorch model for quantization process through three parts:
@@ -951,7 +952,7 @@ def qmodel_prep(
             model, device_ids=DPorDDPdevices
         )
 
-    qconfig_save(qcfg, fname=folder+"/qcfg.json")
+    qconfig_save(qcfg, fname=qcfg["output_folder"]+"/qcfg.json")
     qcfg["tb_writer"] = tb_writer
 
     logger.info(f"--- Quantized model --- \n{model}\n")

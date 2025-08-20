@@ -1,11 +1,11 @@
 # Copyright The FMS Model Optimizer Authors
-#
+
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-#
+
 #     http://www.apache.org/licenses/LICENSE-2.0
-#
+
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -34,6 +34,7 @@ from transformers import (
 )
 import torch
 
+import os
 # Local
 from fms_mo import qconfig_init, qmodel_prep
 from fms_mo.custom_ext_kernels.utils import (
@@ -50,8 +51,11 @@ from fms_mo.utils.aiu_utils import save_for_aiu
 from fms_mo.utils.dq_utils import config_quantize_smooth_layers
 from fms_mo.utils.eval_utils import Evaluator, eval_llm_1GPU
 from fms_mo.utils.utils import patch_torch_bmm, prepare_input
-from fms_mo.utils.dq_inf import load_fp8_vllm, save_vllm_fp8
-from accelerate import load_checkpoint_and_dispatch
+from fms_mo.utils.dq_inf import (
+    save_vllm_fp8,
+    convert_fp8_vllm_to_fms_mo,
+    check_quantization_setting,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +133,17 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
         low_cpu_mem_usage=bool(model_args.device_map),
     )
 
+    inference= model.config.to_dict().get("quantization_config",None)
+
+    if inference:
+        quant_setting = check_quantization_setting(inference)
+        if quant_setting:
+            logger.info("Quantization config settings validated ")
+            model = convert_fp8_vllm_to_fms_mo(model = model)
+        else:
+            exit("__This quantization config is wrong/not supported__")
+
+
     embedding_size = model.get_input_embeddings().weight.shape[0]
     if len(tokenizer) > embedding_size:
         model.resize_token_embeddings(len(tokenizer))
@@ -136,11 +151,24 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
     logger.info(f"Initialized model is: \n {model}")
     logger.info(f"Model is at {model.device} after intialization")
     logger.info(f"Tokenizer is {tokenizer}, block size is {block_size}")
-    
-    if not fms_mo_args.inference or fms_mo_args.vllm_fp8_load:
+
+    if not inference:
+        logger.info("quantization mode activated, initalizing the qcfg file ")
         qcfg = qconfig_init(recipe="dq", args=fms_mo_args)
     else:
-        qcfg = qconfig_init(recipe=opt_args.output_dir+"/qcfg")
+        logger.info("inference mode activated")
+        if os.path.isfile(model_args.model_name_or_path+"/qcfg.json"):
+            if fms_mo_args.override_fms_args:
+                logger.info("qcfg file found and some parameters are being over-written ")
+                qcfg = qconfig_init(recipe=model_args.model_name_or_path+"/qcfg", args=fms_mo_args)
+            else:
+                logger.info("qcfg file found, loading the qcfg file ")
+                qcfg = qconfig_init(recipe=model_args.model_name_or_path+"/qcfg")
+        else:
+            logger.info("qcfg file not found in {model_args.model_name_or_path},\
+                        loading fms_mo_args and recipe"
+                        )
+            qcfg = qconfig_init(recipe="dq", args=fms_mo_args)
 
     model_size = model_size_Wb(model, unit="GB")
     gpu_mem_util_per = model_size / total_gpu_memory
@@ -184,6 +212,7 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
     qcfg["model"] = model_args.model_name_or_path
     qcfg["smoothq"] = qcfg.get("smoothq_alpha", -1) >= 0 and "mx_specs" not in qcfg
     qcfg["plotsvg"] = False
+    qcfg["output_folder"] = opt_args.output_dir
 
     calibration_dataset = load_from_disk(data_args.training_data_path)
     calibration_dataset = calibration_dataset.with_format("torch")
@@ -196,7 +225,7 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
     )
 
     # For loading or creating smoothquant scale. Sometimes we may include scales in ckpt as well.
-    if not fms_mo_args.inference and qcfg["smoothq"] :
+    if not inference and qcfg["smoothq"] :
         scale_file = Path(f"./act_scales/{qcfg['model'].replace('/', '-')}.pt")
         if qcfg.get("act_scale_path", None):
             # user provided a scale file (or a dir)
@@ -230,14 +259,12 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
             use_layer_name_pattern_matching=use_layer_name_pattern_matching,
             use_dynamo=use_dynamo,
             dev=dev,
-            mode=fms_mo_args.inference,
+            mode=inference,
             save_fname="dq",
-            folder=opt_args.output_dir,
         )
         logger.info(f"Quantized model {model}")
         logger.info("==" * 20)
-
-    if not fms_mo_args.inference:
+    if not inference:
         if qcfg["smoothq"]:
             logger.info("Starting to apply smooth scale")
             dq_llm(model, act_scales, qcfg)
@@ -264,7 +291,7 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
                 f"Saving model processed for AIU and tokenizer to {opt_args.output_dir}"
             )
             save_for_aiu(model, qcfg, output_dir=opt_args.output_dir, verbose=True)
-        elif opt_args.save_ckpt_for_vllm:
+        elif not opt_args.save_ckpt:
             logger.info(
                 f"Saving model processed for vLLM and tokenizer to {opt_args.output_dir}"
             )
@@ -286,19 +313,6 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
                 chunk_size=qcfg.get("chunk_size", 32),  # 1024
                 clamp_acc_to_dl16=fms_mo_args.aiu_sim_triton == "fp8",
                 # layer_to_exclude=["lm_head",]
-            )
-    else:
-        if fms_mo_args.vllm_fp8_load:
-            logger.info("loading llmcompressor fp8 model saved_checkpoint")
-            model = load_fp8_vllm( model=model, checkpoint=opt_args.output_dir)
-
-        else:
-            logger.info("loading dq fms_mo fp8 model saved_checkpoint")
-            model = load_checkpoint_and_dispatch( 
-                model,
-                checkpoint=opt_args.output_dir,
-                device_map=None,
-                no_split_module_classes=['Block']
             )
 
     if fms_mo_args.eval_ppl:

@@ -160,10 +160,6 @@ class OptArguments(TypeChecker):
         default=False,
         metadata={"help": "Prepare and save AIU-compliant checkpoint."},
     )
-    save_ckpt_for_vllm: bool = field(
-        default=False,
-        metadata={"help": "Prepare and save vllm-compliant checkpoint."},
-    )
 
 
 @dataclass
@@ -214,8 +210,7 @@ class FMSMOArguments(TypeChecker):
         metadata={"help": "Apply recomputation during checkpoint saving for AIU."},
     )
     fp8_use_subnormal: bool = field(default=False)
-    inference: bool = field(default=False)
-    vllm_fp8_load: bool = field(default=False)
+    override_fms_args: bool = field(default=False)
 
 
 @dataclass
