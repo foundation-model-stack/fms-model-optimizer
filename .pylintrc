@@ -69,7 +69,8 @@ ignored-modules=gptqmodel,
                 llmcompressor,
                 cutlass_mm,
                 pygraphviz,
-                matplotlib
+                matplotlib,
+                compressed_tensors
 
 # Python code to execute, usually for sys.path manipulation such as
 # pygtk.require().

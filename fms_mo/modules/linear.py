@@ -281,7 +281,6 @@ class QLinear(nn.Linear):
                 )
 
             # pylint: disable=not-callable
-            
             return F.linear(x, self.W_fp, self.bias)
         else:
             qinput = self.quantize_feature(x / scale).to(x.dtype)
@@ -297,6 +296,7 @@ class QLinear(nn.Linear):
                 )
 
         qbias = self.bias
+
         # pylint: disable=not-callable
         output = F.linear(qinput, qweight, qbias)
 

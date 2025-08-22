@@ -237,7 +237,7 @@ def get_weight_quantizer(
     recompute=False,
     perGp=None,
     use_subnormal=False,
-    emulate = True,
+    emulate=True,
 ):
     """Return a quantizer for weight quantization
     Regular quantizers:
