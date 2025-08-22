@@ -209,6 +209,8 @@ class FMSMOArguments(TypeChecker):
         default=False,
         metadata={"help": "Apply recomputation during checkpoint saving for AIU."},
     )
+    fp8_use_subnormal: bool = field(default=False)
+    override_fms_args: bool = field(default=False)
 
 
 @dataclass

@@ -88,6 +88,8 @@ def config_defaults() -> dict:
         "nbits_w_lstm": None,
         "nbits_i_lstm": None,
         "nbits_h_lstm": None,
+        "inference": False,
+        "output_folder": None,
         # qmodes vars
         "qa_mode": "pact+",
         "qw_mode": "sawb+",
@@ -299,6 +301,8 @@ def qconfig_init(recipe: str = None, args: Any = None, use_mx: bool = False) -> 
     qcfg["w_init_method"] = "sawb"
     qcfg["a_init_method"] = "percentile"
     qcfg["clip_val_asst_percentile"] = (0.1, 99.9)
+    qcfg["inference"] = False
+    qcfg["output_folder"] = None
 
     # ways to control which layers to be quantized/skipped
     qcfg["qlayer_name_pattern"] = []

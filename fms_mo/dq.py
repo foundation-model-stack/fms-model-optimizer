@@ -21,6 +21,8 @@ Script for direct quantization
 # Standard
 from pathlib import Path
 import logging
+import os
+import sys
 
 # Third Party
 from datasets import load_from_disk
@@ -47,6 +49,11 @@ from fms_mo.quant.ptq import (
     get_act_scales_1gpu,
 )
 from fms_mo.utils.aiu_utils import save_for_aiu
+from fms_mo.utils.dq_inf import (
+    check_quantization_setting,
+    convert_fp8_vllm_to_fms_mo,
+    save_vllm_fp8,
+)
 from fms_mo.utils.dq_utils import config_quantize_smooth_layers
 from fms_mo.utils.eval_utils import Evaluator, eval_llm_1GPU
 from fms_mo.utils.utils import patch_torch_bmm, prepare_input
@@ -127,6 +134,18 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
         low_cpu_mem_usage=bool(model_args.device_map),
     )
 
+    inference_qconfig = None
+    if hasattr(model, "config"):
+        inference_qconfig = model.config.to_dict().get("quantization_config", None)
+
+    if inference_qconfig:
+        quant_setting = check_quantization_setting(inference_qconfig)
+        if quant_setting:
+            logger.info("Quantization config settings validated ")
+            model = convert_fp8_vllm_to_fms_mo(model=model)
+        else:
+            sys.exit("Error: This quantization config is wrong/not supported")
+
     embedding_size = model.get_input_embeddings().weight.shape[0]
     if len(tokenizer) > embedding_size:
         model.resize_token_embeddings(len(tokenizer))
@@ -134,7 +153,30 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
     logger.info(f"Initialized model is: \n {model}")
     logger.info(f"Model is at {model.device} after intialization")
     logger.info(f"Tokenizer is {tokenizer}, block size is {block_size}")
-    qcfg = qconfig_init(recipe="dq", args=fms_mo_args)
+
+    if not inference_qconfig:
+        logger.info("quantization mode activated, initalizing the qcfg file ")
+        qcfg = qconfig_init(recipe="dq", args=fms_mo_args)
+    else:
+        logger.info("inference mode activated")
+        if os.path.isfile(model_args.model_name_or_path + "/qcfg.json"):
+            if fms_mo_args.override_fms_args:
+                logger.info(
+                    "qcfg file found and some parameters are being over-written "
+                )
+                qcfg = qconfig_init(
+                    recipe=model_args.model_name_or_path + "/qcfg", args=fms_mo_args
+                )
+            else:
+                logger.info("qcfg file found, loading the qcfg file ")
+                qcfg = qconfig_init(recipe=model_args.model_name_or_path + "/qcfg")
+        else:
+            logger.info(
+                "qcfg file not found in {model_args.model_name_or_path},\
+                        loading fms_mo_args and recipe"
+            )
+            qcfg = qconfig_init(recipe="dq", args=fms_mo_args)
+        qcfg["inference"] = True
 
     model_size = model_size_Wb(model, unit="GB")
     gpu_mem_util_per = model_size / total_gpu_memory
@@ -159,7 +201,8 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
 
     qcfg["model"] = model_args.model_name_or_path
     # config layers to skip, smooth scale
-    config_quantize_smooth_layers(qcfg)
+    if not inference_qconfig:
+        config_quantize_smooth_layers(qcfg)
 
     use_dynamo = True
     # use dynamo as default unless really needed, False -> fallback to TorchScript tracing
@@ -178,6 +221,7 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
     qcfg["model"] = model_args.model_name_or_path
     qcfg["smoothq"] = qcfg.get("smoothq_alpha", -1) >= 0 and "mx_specs" not in qcfg
     qcfg["plotsvg"] = False
+    qcfg["output_folder"] = opt_args.output_dir
 
     calibration_dataset = load_from_disk(data_args.training_data_path)
     calibration_dataset = calibration_dataset.with_format("torch")
@@ -190,7 +234,7 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
     )
 
     # For loading or creating smoothquant scale. Sometimes we may include scales in ckpt as well.
-    if qcfg["smoothq"]:
+    if not inference_qconfig and qcfg["smoothq"]:
         scale_file = Path(f"./act_scales/{qcfg['model'].replace('/', '-')}.pt")
         if qcfg.get("act_scale_path", None):
             # user provided a scale file (or a dir)
@@ -228,49 +272,56 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
         )
         logger.info(f"Quantized model {model}")
         logger.info("==" * 20)
+    if not inference_qconfig:
+        if qcfg["smoothq"]:
+            logger.info("Starting to apply smooth scale")
+            dq_llm(model, act_scales, qcfg)
+            logger.info("Finished applying smooth scale")
 
-    if qcfg["smoothq"]:
-        logger.info("Starting to apply smooth scale")
-        dq_llm(model, act_scales, qcfg)
-        logger.info("Finished applying smooth scale")
+        if qcfg["qmodel_calibration_new"] > 0:
+            logger.info("Starting to calibrate activation clip_val")
+            if qcfg["large_model"]:
+                calibration_llm_1GPU_v2(qcfg, model, dq_dataloader)
+            else:
+                model.to("cuda")
+                pbar = tqdm(
+                    dq_dataloader,
+                    desc=" calibration after applying smoothq scale and before inference",
+                    total=qcfg["qmodel_calibration_new"],
+                )
+                for data_mb, _ in zip(pbar, range(qcfg["qmodel_calibration_new"])):
+                    data_mb = prepare_input(model.device, data_mb)
+                    with patch_torch_bmm(qcfg):
+                        model(**data_mb)
 
-    if qcfg["qmodel_calibration_new"] > 0:
-        logger.info("Starting to calibrate activation clip_val")
-        if qcfg["large_model"]:
-            calibration_llm_1GPU_v2(qcfg, model, dq_dataloader)
-        else:
-            model.to("cuda")
-            pbar = tqdm(
-                dq_dataloader,
-                desc=" calibration after applying smoothq scale and before inference",
-                total=qcfg["qmodel_calibration_new"],
+        if opt_args.save_ckpt_for_aiu:
+            logger.info(
+                f"Saving model processed for AIU and tokenizer to {opt_args.output_dir}"
             )
-            for data_mb, _ in zip(pbar, range(qcfg["qmodel_calibration_new"])):
-                data_mb = prepare_input(model.device, data_mb)
-                with patch_torch_bmm(qcfg):
-                    model(**data_mb)
+            save_for_aiu(model, qcfg, output_dir=opt_args.output_dir, verbose=True)
+        elif not opt_args.save_ckpt:
+            logger.info(
+                f"Saving model processed for vLLM and tokenizer to {opt_args.output_dir}"
+            )
+            save_vllm_fp8(model, qcfg, tokenizer, opt_args.output_dir)
+        elif opt_args.save_ckpt:
+            logger.info(
+                f"Saving quantized model and tokenizer to {opt_args.output_dir}"
+            )
+            model.save_pretrained(opt_args.output_dir, use_safetensors=True)
+            tokenizer.save_pretrained(opt_args.output_dir)
 
-    if opt_args.save_ckpt_for_aiu:
-        logger.info(
-            f"Saving model processed for AIU and tokenizer to {opt_args.output_dir}"
-        )
-        save_for_aiu(model, qcfg, output_dir=opt_args.output_dir, verbose=True)
-    elif opt_args.save_ckpt:
-        logger.info(f"Saving quantized model and tokenizer to {opt_args.output_dir}")
-        model.save_pretrained(opt_args.output_dir, use_safetensors=True)
-        tokenizer.save_pretrained(opt_args.output_dir)
-
-    if fms_mo_args.aiu_sim_triton:
-        # NOTE plz apply correct HW settings here, defaults are not real HW params
-        lower_qmodel_triton(
-            model,
-            use_dyn_max_act=-1 if qcfg["qa_mode"] == "pertokenmax" else False,
-            max_acc_bits=qcfg.get("max_acc_bits", 32),
-            num_lsb_to_truncate=qcfg.get("lsb_trun_bits", 0),
-            chunk_size=qcfg.get("chunk_size", 32),  # 1024
-            clamp_acc_to_dl16=fms_mo_args.aiu_sim_triton == "fp8",
-            # layer_to_exclude=["lm_head",]
-        )
+        if fms_mo_args.aiu_sim_triton:
+            # NOTE plz apply correct HW settings here, defaults are not real HW params
+            lower_qmodel_triton(
+                model,
+                use_dyn_max_act=-1 if qcfg["qa_mode"] == "pertokenmax" else False,
+                max_acc_bits=qcfg.get("max_acc_bits", 32),
+                num_lsb_to_truncate=qcfg.get("lsb_trun_bits", 0),
+                chunk_size=qcfg.get("chunk_size", 32),  # 1024
+                clamp_acc_to_dl16=fms_mo_args.aiu_sim_triton == "fp8",
+                # layer_to_exclude=["lm_head",]
+            )
 
     if fms_mo_args.eval_ppl:
         path_test = Path(data_args.test_data_path)
