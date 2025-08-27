@@ -701,7 +701,7 @@ def qmodel_prep(
     Returns:
         nn.Module: quantized model ready for further PTQ/QAT
     """
-    if qcfg["inference"]:
+    if qcfg["fp8_inference"]:
         if qcfg.get("QBmm"):
             swap_qbmm(model, qcfg)
 

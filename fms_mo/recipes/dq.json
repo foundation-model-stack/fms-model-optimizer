@@ -11,6 +11,6 @@
     "nbits_bmm1" : 32,
     "nbits_bmm2" : 32,
     "nbits_kvcache" : 32,
-    "inference": false,
+    "fp8_inference": false,
     "output_folder": null
 }

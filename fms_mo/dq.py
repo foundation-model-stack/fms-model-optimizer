@@ -176,7 +176,7 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
                         loading fms_mo_args and recipe"
             )
             qcfg = qconfig_init(recipe="dq", args=fms_mo_args)
-        qcfg["inference"] = True
+        qcfg["fp8_inference"] = True
 
     model_size = model_size_Wb(model, unit="GB")
     gpu_mem_util_per = model_size / total_gpu_memory
