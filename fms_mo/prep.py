@@ -410,7 +410,7 @@ def make_quant_module(module, curr_full_name, qcfg, verbose=False):
             if verbose:
                 logger.info(
                     f"Skip quantization of {curr_full_name} - mapping of Linear is None"
-                )
+            )
             return module_output  # None means no swap for this type
 
         module_output = QLin(
