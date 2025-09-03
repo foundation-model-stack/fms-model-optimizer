@@ -49,7 +49,7 @@ def check_quantization_setting(model: nn.Module = None):
     logger.info("Validating config settings")
     if quant_config["quant_method"] == "compressed-tensors":
         if quant_config["format"] != "float-quantized":
-            raise Exception(
+            raise ValueError(
                 "The input activation and weight quantization dtypes are not supported"
             )
 
@@ -57,23 +57,23 @@ def check_quantization_setting(model: nn.Module = None):
             quant_config["config_groups"]["group_0"]["input_activations"]["num_bits"]
             != 8
         ):
-            raise Exception("Only 8 bit FP input activation quantization is supported")
+            raise ValueError("Only 8 bit FP input activation quantization is supported")
 
         if quant_config["config_groups"]["group_0"]["weights"]["num_bits"] != 8:
-            raise Exception("Only 8-bit FP weight quantization  is supported")
+            raise ValueError("Only 8-bit FP weight quantization  is supported")
 
         if quant_config["kv_cache_scheme"] is None:
             pass
         else:
             if quant_config["kv_cache_scheme"]["type"] is not float:
-                raise Exception("The KV-Cache quantization dtype is not supported")
+                raise ValueError("The KV-Cache quantization dtype is not supported")
 
             if quant_config["kv_cache_scheme"]["num_bits"] != 8:
-                raise Exception("Only 8-bit KV-Cache quantization dtype is supported")
+                raise ValueError("Only 8-bit KV-Cache quantization dtype is supported")
 
         return True
 
-    raise Exception("This quantization method is not supported for inferencing")
+    raise ValueError("This quantization method is not supported for inferencing")
 
 
 def load_inference_qconfig_file(model_args, fms_mo_args):
@@ -115,7 +115,7 @@ def update_qcfg_from_model_config(model_args, qcfg):
     ):
         qcfg["qa_mode"] = "fp8_e4m3_scale_perToken"
     else:
-        raise Exception("Only perToken Fp8 activation quantizer is supported")
+        raise ValueError("Only perToken Fp8 activation quantizer is supported")
 
     if (
         config["quantization_config"]["config_groups"]["group_0"]["weights"]["strategy"]
@@ -128,7 +128,7 @@ def update_qcfg_from_model_config(model_args, qcfg):
     ):
         qcfg["qw_mode"] = "fp8_e4m3_scale"
     else:
-        raise Exception(
+        raise ValueError(
             "Only perChannel or pertensor FP8 quantizers are currently supported"
         )
 
