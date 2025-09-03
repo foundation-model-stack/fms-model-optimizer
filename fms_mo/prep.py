@@ -404,13 +404,13 @@ def make_quant_module(module, curr_full_name, qcfg, verbose=False):
                     f"{curr_full_name} {type(module)} seems to be a wrapper of Linear."
                     "Please make sure it doesn't wrap BN and activ func. Otherwise"
                     "please create an equivalent Linear wrapper and change qcfg['mapping']."
-                    )
+                )
         QLin = mapping.get(nn.Linear, None)
         if QLin is None:
             if verbose:
                 logger.info(
                     f"Skip quantization of {curr_full_name} - mapping of Linear is None"
-            )
+                )
             return module_output  # None means no swap for this type
 
         module_output = QLin(
