@@ -42,7 +42,6 @@ optional_packages = [
     "torchvision",
     "huggingface_hub",
     "torchao",
-    #"compressed_tensors",
 ]
 
 available_packages = {}
