@@ -21,8 +21,6 @@ Script for direct quantization
 # Standard
 from pathlib import Path
 import logging
-import os
-import sys
 
 # Third Party
 from datasets import load_from_disk
@@ -52,6 +50,7 @@ from fms_mo.utils.aiu_utils import save_for_aiu
 from fms_mo.utils.dq_inf import (
     check_quantization_setting,
     convert_fp8_vllm_to_fms_mo,
+    load_inference_qconfig_file,
     save_vllm_fp8,
 )
 from fms_mo.utils.dq_utils import config_quantize_smooth_layers
@@ -134,18 +133,6 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
         low_cpu_mem_usage=bool(model_args.device_map),
     )
 
-    inference_qconfig = None
-    if hasattr(model, "config"):
-        inference_qconfig = model.config.to_dict().get("quantization_config", None)
-
-    if inference_qconfig:
-        quant_setting = check_quantization_setting(inference_qconfig)
-        if quant_setting:
-            logger.info("Quantization config settings validated ")
-            model = convert_fp8_vllm_to_fms_mo(model=model)
-        else:
-            sys.exit("Error: This quantization config is wrong/not supported")
-
     embedding_size = model.get_input_embeddings().weight.shape[0]
     if len(tokenizer) > embedding_size:
         model.resize_token_embeddings(len(tokenizer))
@@ -154,29 +141,17 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
     logger.info(f"Model is at {model.device} after intialization")
     logger.info(f"Tokenizer is {tokenizer}, block size is {block_size}")
 
-    if not inference_qconfig:
+    quant_mode = check_quantization_setting(model)
+
+    if not quant_mode:
         logger.info("quantization mode activated, initalizing the qcfg file ")
         qcfg = qconfig_init(recipe="dq", args=fms_mo_args)
     else:
         logger.info("inference mode activated")
-        if os.path.isfile(model_args.model_name_or_path + "/qcfg.json"):
-            if fms_mo_args.override_fms_args:
-                logger.info(
-                    "qcfg file found and some parameters are being over-written "
-                )
-                qcfg = qconfig_init(
-                    recipe=model_args.model_name_or_path + "/qcfg", args=fms_mo_args
-                )
-            else:
-                logger.info("qcfg file found, loading the qcfg file ")
-                qcfg = qconfig_init(recipe=model_args.model_name_or_path + "/qcfg")
-        else:
-            logger.info(
-                "qcfg file not found in {model_args.model_name_or_path},\
-                        loading fms_mo_args and recipe"
-            )
-            qcfg = qconfig_init(recipe="dq", args=fms_mo_args)
-        qcfg["fp8_inference"] = True
+        qcfg = load_inference_qconfig_file(model_args, fms_mo_args)
+
+    if quant_mode:
+        model = convert_fp8_vllm_to_fms_mo(model=model)
 
     model_size = model_size_Wb(model, unit="GB")
     gpu_mem_util_per = model_size / total_gpu_memory
@@ -201,7 +176,7 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
 
     qcfg["model"] = model_args.model_name_or_path
     # config layers to skip, smooth scale
-    if not inference_qconfig:
+    if not quant_mode:
         config_quantize_smooth_layers(qcfg)
 
     use_dynamo = True
@@ -234,7 +209,7 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
     )
 
     # For loading or creating smoothquant scale. Sometimes we may include scales in ckpt as well.
-    if not inference_qconfig and qcfg["smoothq"]:
+    if not quant_mode and qcfg["smoothq"]:
         scale_file = Path(f"./act_scales/{qcfg['model'].replace('/', '-')}.pt")
         if qcfg.get("act_scale_path", None):
             # user provided a scale file (or a dir)
@@ -272,7 +247,8 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
         )
         logger.info(f"Quantized model {model}")
         logger.info("==" * 20)
-    if not inference_qconfig:
+
+    if not quant_mode:
         if qcfg["smoothq"]:
             logger.info("Starting to apply smooth scale")
             dq_llm(model, act_scales, qcfg)

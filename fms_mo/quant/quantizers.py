@@ -237,7 +237,6 @@ def get_weight_quantizer(
     recompute=False,
     perGp=None,
     use_subnormal=False,
-    emulate=True,
 ):
     """Return a quantizer for weight quantization
     Regular quantizers:
@@ -347,7 +346,7 @@ def get_weight_quantizer(
                 weight_quantizer = to_fp8(
                     nbits,
                     q_mode=qw_mode,
-                    emulate=emulate,
+                    emulate=True,
                     perCh=Nch,
                 )
         else:

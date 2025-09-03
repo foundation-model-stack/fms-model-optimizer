@@ -29,23 +29,119 @@ from torch import nn
 import torch
 
 # Local
+from fms_mo import qconfig_init
 from fms_mo.quant.quantizers import to_fp8_scaled_perCh
 from fms_mo.utils.qconfig_utils import get_recipe
 
 logger = logging.getLogger(__name__)
 
 
-def check_quantization_setting(inference: dict = None):
+def check_quantization_setting(model: nn.Module = None):
     """
     function checks if the checkpoint is from fp8 quantization
     """
-    return (
-        inference["config_groups"]["group_0"]["input_activations"]["num_bits"] == 8
-        and inference["config_groups"]["group_0"]["weights"]["num_bits"] == 8
-        and inference["config_groups"]["group_0"]["weights"]["type"] == "float"
-        and inference["config_groups"]["group_0"]["input_activations"]["type"]
-        == "float"
-    )
+    quant_config = None
+    if hasattr(model, "config"):
+        quant_config = model.config.to_dict().get("quantization_config", None)
+    if quant_config is None:
+        return False
+
+    logger.info("Validating config settings")
+    if quant_config["quant_method"] == "compressed-tensors":
+        if quant_config["format"] != "float-quantized":
+            raise Exception(
+                "The input activation and weight quantization dtypes are not supported"
+            )
+
+        if (
+            quant_config["config_groups"]["group_0"]["input_activations"]["num_bits"]
+            != 8
+        ):
+            raise Exception("Only 8 bit FP input activation quantization is supported")
+
+        if quant_config["config_groups"]["group_0"]["weights"]["num_bits"] != 8:
+            raise Exception("Only 8-bit FP weight quantization  is supported")
+
+        if quant_config["kv_cache_scheme"] is None:
+            pass
+        else:
+            if quant_config["kv_cache_scheme"]["type"] is not float:
+                raise Exception("The KV-Cache quantization dtype is not supported")
+
+            if quant_config["kv_cache_scheme"]["num_bits"] != 8:
+                raise Exception("Only 8-bit KV-Cache quantization dtype is supported")
+
+        return True
+
+    raise Exception("This quantization method is not supported for inferencing")
+
+
+def load_inference_qconfig_file(model_args, fms_mo_args):
+    """
+    Function to load the inference quantization config for fms_mo
+    """
+    if os.path.isfile(model_args.model_name_or_path + "/qcfg.json"):
+        if fms_mo_args.override_qcfg_args:
+            logger.info("qcfg file found and some parameters are being over-written")
+            qcfg = qconfig_init(
+                recipe=model_args.model_name_or_path + "/qcfg", args=fms_mo_args
+            )
+        else:
+            logger.info("qcfg file found, loading the qcfg file ")
+            qcfg = qconfig_init(recipe=model_args.model_name_or_path + "/qcfg")
+    else:
+        logger.info(
+            f"qcfg file not found in {model_args.model_name_or_path},\
+                    loading fms_mo_args and recipe"
+        )
+        qcfg = qconfig_init(recipe="dq", args=fms_mo_args)
+        qcfg = update_qcfg_from_model_config(model_args, qcfg)
+    qcfg["fp8_inference"] = True
+
+    return qcfg
+
+
+def update_qcfg_from_model_config(model_args, qcfg):
+    """
+    function to update the default qcfg setting with settings in the model config file.
+    Important for the case where qcfg file does not exist.
+    """
+    config = get_recipe(model_args.model_name_or_path + "/config")
+    if (
+        config["quantization_config"]["config_groups"]["group_0"]["input_activations"][
+            "strategy"
+        ]
+        == "token"
+    ):
+        qcfg["qa_mode"] = "fp8_e4m3_scale_perToken"
+    else:
+        raise Exception("Only perToken Fp8 activation quantizer is supported")
+
+    if (
+        config["quantization_config"]["config_groups"]["group_0"]["weights"]["strategy"]
+        == "channel"
+    ):
+        qcfg["qw_mode"] = "fp8_e4m3_scale_perCh"
+    elif (
+        config["quantization_config"]["config_groups"]["group_0"]["weights"]["strategy"]
+        == "tensor"
+    ):
+        qcfg["qw_mode"] = "fp8_e4m3_scale"
+    else:
+        raise Exception(
+            "Only perChannel or pertensor FP8 quantizers are currently supported"
+        )
+
+    qcfg["smoothq"] = False
+    qcfg["nbits_a"] = config["quantization_config"]["config_groups"]["group_0"][
+        "input_activations"
+    ]["num_bits"]
+    qcfg["nbits_w"] = config["quantization_config"]["config_groups"]["group_0"][
+        "weights"
+    ]["num_bits"]
+    qcfg["torch_dtype"] = "float16"
+
+    return qcfg
 
 
 # def rename_fms_dict_to_vllm_dict (model_dict : dict= None, qcfg : dict = None):
