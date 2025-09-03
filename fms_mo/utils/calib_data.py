@@ -26,7 +26,7 @@ import random
 
 # Third Party
 from datasets import load_dataset, load_from_disk
-from transformers import AutoTokenizer, BatchEncoding
+from transformers import BatchEncoding
 import datasets
 import torch
 
@@ -260,12 +260,12 @@ def get_self_instruct_starcoder(
     }
     for k in range(nsamples):
         tokenized = tokenizer(
-            cr_dataset[k]["output"], return_tensors="pt", 
+            cr_dataset[k]["output"], return_tensors="pt",
             padding="max_length", max_length = seqlen
         )
         trainloader["input_ids"][k] = tokenized.input_ids.squeeze(0)
         trainloader["attention_mask"][k] = tokenized.attention_mask.squeeze(0)
-        
+
     return trainloader, eval_dataset
 
 
