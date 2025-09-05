@@ -17,6 +17,7 @@ Evaluation utils for fast model loading and saving for FP8 DQ
 """
 
 # Standard
+from typing import Any, Dict, List, Tuple, Union
 import glob
 import json
 import logging
@@ -36,7 +37,7 @@ from fms_mo.utils.qconfig_utils import get_recipe
 logger = logging.getLogger(__name__)
 
 
-def check_quantization_setting(model: nn.Module = None):
+def check_quantization_setting(model: nn.Module) -> bool:
     """
     function checks if the checkpoint is from fp8 quantization
     """
@@ -47,36 +48,49 @@ def check_quantization_setting(model: nn.Module = None):
         return False
 
     logger.info("Validating config settings")
-    if quant_config["quant_method"] == "compressed-tensors":
-        if quant_config["format"] != "float-quantized":
-            raise ValueError(
-                "The input activation and weight quantization dtypes are not supported"
-            )
+    if "quant_method" in quant_config.keys():
+        if quant_config["quant_method"] == "compressed-tensors":
+            if quant_config["format"] != "float-quantized":
+                raise ValueError(
+                    "The input activation and weight quantization dtypes are not supported"
+                )
 
-        if (
-            quant_config["config_groups"]["group_0"]["input_activations"]["num_bits"]
-            != 8
-        ):
-            raise ValueError("Only 8 bit FP input activation quantization is supported")
+            if (
+                quant_config["config_groups"]["group_0"]["input_activations"][
+                    "num_bits"
+                ]
+                != 8
+            ):
+                raise ValueError(
+                    "Only 8 bit FP input activation quantization is supported"
+                )
 
-        if quant_config["config_groups"]["group_0"]["weights"]["num_bits"] != 8:
-            raise ValueError("Only 8-bit FP weight quantization  is supported")
+            if quant_config["config_groups"]["group_0"]["weights"]["num_bits"] != 8:
+                raise ValueError("Only 8-bit FP weight quantization  is supported")
 
-        if quant_config["kv_cache_scheme"] is None:
-            pass
-        else:
-            if quant_config["kv_cache_scheme"]["type"] is not float:
-                raise ValueError("The KV-Cache quantization dtype is not supported")
+            if quant_config["kv_cache_scheme"] is not None:
+                if quant_config["kv_cache_scheme"]["type"] is not float:
+                    raise ValueError("The KV-Cache quantization dtype is not supported")
 
-            if quant_config["kv_cache_scheme"]["num_bits"] != 8:
-                raise ValueError("Only 8-bit KV-Cache quantization dtype is supported")
+                if quant_config["kv_cache_scheme"]["num_bits"] != 8:
+                    raise ValueError(
+                        "Only 8-bit KV-Cache quantization dtype is supported"
+                    )
 
-        return True
+            return True
+        raise ValueError(
+            "The quantization method is not supported for inferencing."
+            "Only Fp8 quantization is supported"
+        )
 
-    raise ValueError("This quantization method is not supported for inferencing")
+    raise ValueError(
+        "The quantization method is not found. Please check the config file"
+    )
 
 
-def load_inference_qconfig_file(model_args, fms_mo_args):
+def load_inference_qconfig_file(
+    model_args: Any = None, fms_mo_args: Any = None
+) -> Dict[str, Union[int, float, str]]:
     """
     Function to load the inference quantization config for fms_mo
     """
@@ -87,12 +101,13 @@ def load_inference_qconfig_file(model_args, fms_mo_args):
                 recipe=model_args.model_name_or_path + "/qcfg", args=fms_mo_args
             )
         else:
-            logger.info("qcfg file found, loading the qcfg file ")
+            logger.info(f"loading quantization configuration from\
+                        {model_args.model_name_or_path + '/qcfg.json'}")
             qcfg = qconfig_init(recipe=model_args.model_name_or_path + "/qcfg")
     else:
         logger.info(
-            f"qcfg file not found in {model_args.model_name_or_path},\
-                    loading fms_mo_args and recipe"
+            f"qcfg file not found in {model_args.model_name_or_path},"
+            "loading fms_mo_args and recipe"
         )
         qcfg = qconfig_init(recipe="dq", args=fms_mo_args)
         qcfg = update_qcfg_from_model_config(model_args, qcfg)
@@ -101,7 +116,9 @@ def load_inference_qconfig_file(model_args, fms_mo_args):
     return qcfg
 
 
-def update_qcfg_from_model_config(model_args, qcfg):
+def update_qcfg_from_model_config(
+    model_args: Any = None, qcfg: dict = None
+) -> Dict[str, Union[int, float, str]]:
     """
     function to update the default qcfg setting with settings in the model config file.
     Important for the case where qcfg file does not exist.
@@ -144,15 +161,16 @@ def update_qcfg_from_model_config(model_args, qcfg):
     return qcfg
 
 
-# def rename_fms_dict_to_vllm_dict (model_dict : dict= None, qcfg : dict = None):
-def rename_fms_dict_to_vllm_dict(model_dict: dict = None):
+def rename_fms_dict_to_vllm_dict(
+    model_dict: dict = None,
+) -> Tuple[Dict[str, Union[int, float]], Dict[str, Union[int, float]]]:
     """
     Function to rename the dict in fms_mo format to vllm_format.
     """
     st_dict = {}
     fms_dict = {}
     keys = model_dict.keys()
-
+    logger.info("WARNING: only static weights per-channel is supported at this time")
     for k, v in model_dict.items():
         if ".weight" in k:
             key = k.split("weight")[0]
@@ -167,7 +185,9 @@ def rename_fms_dict_to_vllm_dict(model_dict: dict = None):
     return st_dict, fms_dict
 
 
-def update_config(model_config_file: dict = None, qcfg: dict = None):
+def update_config(
+    model_config_file: dict = None, qcfg: dict = None
+) -> Dict[str, Union[int, str]]:
     """
     Function to update the model config file with quantization configuration
     """
@@ -181,7 +201,9 @@ def update_config(model_config_file: dict = None, qcfg: dict = None):
     return model_config_file
 
 
-def save_vllm_fp8(model: nn.Module, qcfg: dict, tokenizer=None, folder: str = None):
+def save_vllm_fp8(
+    model: nn.Module, qcfg: dict, tokenizer=None, folder: str = None
+) -> None:
     """
     Function to save fp8 DQ model in vllm fp8 format
     """
@@ -200,7 +222,9 @@ def save_vllm_fp8(model: nn.Module, qcfg: dict, tokenizer=None, folder: str = No
         json.dump(config, f, indent=4)
 
 
-def convert_fms_mo_to_vllm_fp8_format(checkpoint: str = None, folder: str = None):
+def convert_fms_mo_to_vllm_fp8_format(
+    checkpoint: str = None, folder: str = None
+) -> None:
     """
     Function to convert fp8 fms_mo DQ model checkpoint to vllm fp8 format
     """
@@ -231,7 +255,7 @@ def convert_fms_mo_to_vllm_fp8_format(checkpoint: str = None, folder: str = None
         json.dump(config, f, indent=4)
 
 
-def find_file_glob(pattern: str, search_path: str):
+def find_file_glob(pattern: str, search_path: str) -> List[str]:
     """
     Finds files matching a pattern within a directory and its subdirectories.
     """
@@ -243,7 +267,7 @@ def find_file_glob(pattern: str, search_path: str):
 
 def convert_fp8_vllm_dict_to_fms_mo_dict(
     checkpoint: str = None, output_dir: str = None
-):
+) -> None:
     """
     Function to help convert vllm fp8 checkpoint into fms_mo fp8 format
     """
@@ -257,7 +281,7 @@ def convert_fp8_vllm_dict_to_fms_mo_dict(
     save_torch_state_dict(fms_mo_dict, output_dir)
 
 
-def rename_vllm_dict_to_fms_mo(vllm_dict: dict = None):
+def rename_vllm_dict_to_fms_mo(vllm_dict: dict) -> dict:
     """
     Function to help rename vllm dict format to fms_mo dict format
     """
@@ -271,14 +295,12 @@ def rename_vllm_dict_to_fms_mo(vllm_dict: dict = None):
             fms_mo_dict[k] = v
         else:
             key = k.split("weight")[0]
-            if key + "weight_scale" in vllm_dict.keys():
-                pass
-            else:
+            if key + "weight_scale" not in vllm_dict.keys():
                 fms_mo_dict[k] = v
     return fms_mo_dict
 
 
-def convert_fp8_vllm_to_fms_mo(model: nn.Module = None):
+def convert_fp8_vllm_to_fms_mo(model: nn.Module = None) -> nn.Module:
     """
     Function to help convert fp8 vllm model dict format to fms_mo fp8 format
     """

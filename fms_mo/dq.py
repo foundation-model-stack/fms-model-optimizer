@@ -141,16 +141,16 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
     logger.info(f"Model is at {model.device} after intialization")
     logger.info(f"Tokenizer is {tokenizer}, block size is {block_size}")
 
-    quant_mode = check_quantization_setting(model)
+    inference_only = check_quantization_setting(model)
 
-    if not quant_mode:
+    if not inference_only:
         logger.info("quantization mode activated, initalizing the qcfg file ")
         qcfg = qconfig_init(recipe="dq", args=fms_mo_args)
     else:
         logger.info("inference mode activated")
         qcfg = load_inference_qconfig_file(model_args, fms_mo_args)
 
-    if quant_mode:
+    if inference_only:
         model = convert_fp8_vllm_to_fms_mo(model=model)
 
     model_size = model_size_Wb(model, unit="GB")
@@ -176,7 +176,7 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
 
     qcfg["model"] = model_args.model_name_or_path
     # config layers to skip, smooth scale
-    if not quant_mode:
+    if not inference_only:
         config_quantize_smooth_layers(qcfg)
 
     use_dynamo = True
@@ -209,7 +209,7 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
     )
 
     # For loading or creating smoothquant scale. Sometimes we may include scales in ckpt as well.
-    if not quant_mode and qcfg["smoothq"]:
+    if not inference_only and qcfg["smoothq"]:
         scale_file = Path(f"./act_scales/{qcfg['model'].replace('/', '-')}.pt")
         if qcfg.get("act_scale_path", None):
             # user provided a scale file (or a dir)
@@ -248,7 +248,7 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
         logger.info(f"Quantized model {model}")
         logger.info("==" * 20)
 
-    if not quant_mode:
+    if not inference_only:
         if qcfg["smoothq"]:
             logger.info("Starting to apply smooth scale")
             dq_llm(model, act_scales, qcfg)
