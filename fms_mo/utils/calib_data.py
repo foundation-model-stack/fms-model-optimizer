@@ -31,13 +31,15 @@ import datasets
 import torch
 
 
-def return_tokenized_samples(nsamples, trainenc, seqlen, sequential=False) -> dict[str, torch.int]:
+def return_tokenized_samples(
+    nsamples: int, trainenc: list, seqlen: int, sequential: bool = False
+) -> dict:
     """Randomly crop nsamples sequence from trainenc, each with the length of seqlen.
     see below functions, e.g. get_wikitext2() for more details.
     """
     traindataset = {
-        "input_ids": torch.zeros(size = (nsamples, seqlen), dtype = torch.int), 
-        "attention_mask": torch.zeros(size = (nsamples, seqlen), dtype = torch.int)
+        "input_ids": torch.zeros(size=(nsamples, seqlen), dtype=torch.int),
+        "attention_mask": torch.zeros(size=(nsamples, seqlen), dtype=torch.int),
     }
     i = 0
 
@@ -57,8 +59,13 @@ def return_tokenized_samples(nsamples, trainenc, seqlen, sequential=False) -> di
 
 
 def get_wikitext2(
-    nsamples, seed, seqlen, tokenizer, sequential=False, gptq_style=False
-):
+    nsamples: int,
+    seed: int,
+    seqlen: int,
+    tokenizer: str,
+    sequential: bool = False,
+    gptq_style: bool = False,
+) -> tuple[dict, dict]:
     """Prepare data for GPTQ using wikitext2 dataset.
 
     Args:
@@ -87,14 +94,21 @@ def get_wikitext2(
         nsamples, trainenc, seqlen, sequential=sequential
     )
     testenc = {
-                "input_ids": testenc["input_ids"], 
-                "attention_mask": testenc["attention_mask"]
+        "input_ids": testenc["input_ids"],
+        "attention_mask": testenc["attention_mask"],
     }
 
     return traindataset, testenc
 
 
-def get_ptb(nsamples, seed, seqlen, tokenizer, sequential=False, gptq_style=False):
+def get_ptb(
+    nsamples: int,
+    seed: int,
+    seqlen: int,
+    tokenizer: str,
+    sequential: bool = False,
+    gptq_style: bool = False,
+) -> tuple[dict, dict]:
     """Prepare data for GPTQ using PTB dataset.
 
     Args:
@@ -117,18 +131,20 @@ def get_ptb(nsamples, seed, seqlen, tokenizer, sequential=False, gptq_style=Fals
         traindata = "\n\n".join(traindata["sentence"])
 
     trainenc = tokenizer(traindata)
-    testenc = tokenizer("\n\n".join(valdata["sentence"]),return_tensors="pt")
+    testenc = tokenizer("\n\n".join(valdata["sentence"]), return_tensors="pt")
 
     traindataset = return_tokenized_samples(nsamples, trainenc, seqlen, sequential)
     testenc = {
-                "input_ids": testenc["input_ids"], 
-                "attention_mask": testenc["attention_mask"]
+        "input_ids": testenc["input_ids"],
+        "attention_mask": testenc["attention_mask"],
     }
 
     return traindataset, testenc
 
 
-def get_c4_train(nsamples, seed, seqlen, tokenizer, sequential=False):
+def get_c4_train(
+    nsamples: int, seed: int, seqlen: int, tokenizer: str, sequential: bool = False
+) -> tuple[dict, dict]:
     """Prepare data for GPTQ using C4 dataset.
 
     Args:
@@ -153,11 +169,11 @@ def get_c4_train(nsamples, seed, seqlen, tokenizer, sequential=False):
         split="validation",
     )
 
-    testenc = tokenizer("\n\n".join(valdata["text"]),return_tensors="pt")
+    testenc = tokenizer("\n\n".join(valdata["text"]), return_tensors="pt")
 
-    trainloader ={
-        "input_ids": torch.zeros(size = (nsamples, seqlen), dtype = torch.int), 
-        "attention_mask": torch.zeros(size = (nsamples, seqlen), dtype = torch.int)
+    trainloader = {
+        "input_ids": torch.zeros(size=(nsamples, seqlen), dtype=torch.int),
+        "attention_mask": torch.zeros(size=(nsamples, seqlen), dtype=torch.int),
     }
     for k in range(nsamples):
         while True:
@@ -182,7 +198,7 @@ def get_c4_train(nsamples, seed, seqlen, tokenizer, sequential=False):
     return trainloader, testdataset
 
 
-def get_c4_new(nsamples, seed, seqlen, tokenizer):
+def get_c4_new(nsamples: int, seed: int, seqlen: int, tokenizer: str):
     """Prepare data for GPTQ using C4 dataset.
 
     Args:
@@ -227,8 +243,8 @@ def get_c4_new(nsamples, seed, seqlen, tokenizer):
 
 
 def get_self_instruct_starcoder(
-    nsamples, seed, seqlen, tokenizer, split_name="curated"
-):  # pylint: disable=unused-argument
+    nsamples: int, seed: int, seqlen: int, tokenizer: str, split_name: str = "curated"
+) -> tuple[dict, dict]:  # pylint: disable=unused-argument
     """Prepare data for GPTQ using starcoder dataset.
 
     Args:
@@ -244,8 +260,8 @@ def get_self_instruct_starcoder(
 
     eval_dataset = tokenizer(" ".join(cr_dataset[:]["output"]), return_tensors="pt")
     eval_dataset = {
-                    "input_ids": eval_dataset["input_ids"], 
-                    "attention_mask": eval_dataset["attention_mask"]
+        "input_ids": eval_dataset["input_ids"],
+        "attention_mask": eval_dataset["attention_mask"],
     }
 
     cr_dataset.shuffle(seed)
@@ -255,13 +271,15 @@ def get_self_instruct_starcoder(
         tokenizer.pad_token = tokenizer.eos_token
 
     trainloader = {
-        "input_ids": torch.zeros(size = (nsamples,seqlen), dtype=torch.int), 
-        "attention_mask": torch.zeros(size = (nsamples,seqlen), dtype=torch.int)
+        "input_ids": torch.zeros(size=(nsamples, seqlen), dtype=torch.int),
+        "attention_mask": torch.zeros(size=(nsamples, seqlen), dtype=torch.int),
     }
     for k in range(nsamples):
         tokenized = tokenizer(
-            cr_dataset[k]["output"], return_tensors="pt",
-            padding="max_length", max_length = seqlen
+            cr_dataset[k]["output"],
+            return_tensors="pt",
+            padding="max_length",
+            max_length=seqlen,
         )
         trainloader["input_ids"][k] = tokenized.input_ids.squeeze(0)
         trainloader["attention_mask"][k] = tokenized.attention_mask.squeeze(0)
@@ -270,8 +288,13 @@ def get_self_instruct_starcoder(
 
 
 def get_cobol_java_supervised(
-    nsamples, seed, seqlen=8192, tokenizer = "", split_name="both", file_path=None
-):
+    nsamples: int,
+    seed: int,
+    seqlen: int = 8192,
+    tokenizer: str = "",
+    split_name: str = "both",
+    file_path: str = None,
+) -> tuple[dict, dict]:
     """Prepare data for GPTQ using cobol/java dataset.
 
     Args:
@@ -294,8 +317,8 @@ def get_cobol_java_supervised(
 
     eval_dataset = tokenizer(data_dict_array["content"], return_tensors="pt")
     eval_dataset = {
-                    "input_ids": eval_dataset["input_ids"], 
-                    "attention_mask": eval_dataset["attention_mask"]
+        "input_ids": eval_dataset["input_ids"],
+        "attention_mask": eval_dataset["attention_mask"],
     }
 
     random.shuffle(data_dict_array)
@@ -303,8 +326,8 @@ def get_cobol_java_supervised(
     nsamples = min(nsamples, len(data_dict_array))
 
     trainloader = {
-        "input_ids": torch.zeros(size = (nsamples,seqlen), dtype=torch.int), 
-        "attention_mask": torch.zeros(size = (nsamples,seqlen), dtype=torch.int)
+        "input_ids": torch.zeros(size=(nsamples, seqlen), dtype=torch.int),
+        "attention_mask": torch.zeros(size=(nsamples, seqlen), dtype=torch.int),
     }
     added_ex = 0
 
@@ -343,15 +366,15 @@ def get_cobol_java_supervised(
 
 
 def get_tokenized_data(
-    name,
-    nsamples=128,
-    seqlen=2048,
-    tokenizer="",
-    seed=0,
-    gptq_style=False,
-    path_to_save=None,
-    field_name=None,
-):
+    name: str,
+    nsamples: int = 128,
+    seqlen: int = 2048,
+    tokenizer: str = "",
+    seed: int = 0,
+    gptq_style: bool = False,
+    path_to_save: str = None,
+    field_name: str = None,
+) -> tuple[dict, dict]:
     """Convenient function to get data. Default to get_wikitext2."""
 
     # Option 1: User provide a dataset from disk, only need to tokenize and format it.
@@ -422,7 +445,10 @@ def get_tokenized_data(
         )
     elif "java" in name:
         traindataset, testdataset = get_cobol_java_supervised(
-            nsamples, seed, seqlen, tokenizer,
+            nsamples,
+            seed,
+            seqlen,
+            tokenizer,
         )
     else:
         raise NotImplementedError(
