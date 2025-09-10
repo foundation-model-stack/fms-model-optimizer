@@ -157,7 +157,7 @@ def update_qcfg_from_model_config(
         "weights"
     ]["num_bits"]
     qcfg["torch_dtype"] = "float16"
-    if config["quantization_config"]["ignore"] is not []:
+    if config["quantization_config"]["ignore"] != []:
         qcfg["qskip_layer_name"] = config["quantization_config"]["ignore"]
         qcfg["qskip_large_mag_layers"] = True
     else:
@@ -201,7 +201,7 @@ def update_config(
         data["quantization_config"]["config_groups"]["group_0"]["weights"] = (
             "{num_bits: 8, type: float, symmetric: true, strategy: tensor}"
         )
-    if qcfg["qskip_large_mag_layers"] == True:
+    if qcfg["qskip_large_mag_layers"] is True:
         data["quantization_config"]["ignore"] = qcfg["qskip_layer_name"]
     model_config_file.update(data)
     return model_config_file
