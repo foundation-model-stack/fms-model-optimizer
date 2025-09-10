@@ -17,7 +17,7 @@ Evaluation utils for fast model loading and saving for FP8 DQ
 """
 
 # Standard
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any
 import glob
 import json
 import logging
@@ -90,7 +90,7 @@ def check_quantization_setting(model: nn.Module) -> bool:
 
 def load_inference_qconfig_file(
     model_args: Any = None, fms_mo_args: Any = None
-) -> Dict[str, Union[int, float, str]]:
+) -> dict[str, int | float | str]:
     """
     Function to load the inference quantization config for fms_mo
     """
@@ -118,7 +118,7 @@ def load_inference_qconfig_file(
 
 def update_qcfg_from_model_config(
     model_args: Any = None, qcfg: dict = None
-) -> Dict[str, Union[int, float, str]]:
+) -> dict[str, int | float | str]:
     """
     function to update the default qcfg setting with settings in the model config file.
     Important for the case where qcfg file does not exist.
@@ -157,13 +157,18 @@ def update_qcfg_from_model_config(
         "weights"
     ]["num_bits"]
     qcfg["torch_dtype"] = "float16"
-
+    if config["quantization_config"]["ignore"] is not []:
+        qcfg["qskip_layer_name"] = config["quantization_config"]["ignore"]
+        qcfg["qskip_large_mag_layers"] = True
+    else:
+        qcfg["qskip_layer_name"] = []
+        qcfg["qskip_large_mag_layers"] = False
     return qcfg
 
 
 def rename_fms_dict_to_vllm_dict(
     model_dict: dict = None,
-) -> Tuple[Dict[str, Union[int, float]], Dict[str, Union[int, float]]]:
+) -> tuple[dict[str, float | int], dict[str, float | int]]:
     """
     Function to rename the dict in fms_mo format to vllm_format.
     """
@@ -187,7 +192,7 @@ def rename_fms_dict_to_vllm_dict(
 
 def update_config(
     model_config_file: dict = None, qcfg: dict = None
-) -> Dict[str, Union[int, str]]:
+) -> dict[str, float | int | str]:
     """
     Function to update the model config file with quantization configuration
     """
@@ -196,7 +201,8 @@ def update_config(
         data["quantization_config"]["config_groups"]["group_0"]["weights"] = (
             "{num_bits: 8, type: float, symmetric: true, strategy: tensor}"
         )
-
+    if qcfg["qskip_large_mag_layers"] == True:
+        data["quantization_config"]["ignore"] = qcfg["qskip_layer_name"]
     model_config_file.update(data)
     return model_config_file
 
@@ -255,7 +261,7 @@ def convert_fms_mo_to_vllm_fp8_format(
         json.dump(config, f, indent=4)
 
 
-def find_file_glob(pattern: str, search_path: str) -> List[str]:
+def find_file_glob(pattern: str, search_path: str) -> list[str]:
     """
     Finds files matching a pattern within a directory and its subdirectories.
     """
@@ -281,7 +287,7 @@ def convert_fp8_vllm_dict_to_fms_mo_dict(
     save_torch_state_dict(fms_mo_dict, output_dir)
 
 
-def rename_vllm_dict_to_fms_mo(vllm_dict: dict) -> dict:
+def rename_vllm_dict_to_fms_mo(vllm_dict: dict) -> dict[str, float | int | str]:
     """
     Function to help rename vllm dict format to fms_mo dict format
     """
