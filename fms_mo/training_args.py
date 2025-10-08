@@ -209,6 +209,7 @@ class FMSMOArguments(TypeChecker):
         default=False,
         metadata={"help": "Apply recomputation during checkpoint saving for AIU."},
     )
+    override_qcfg_args: bool = field(default=False)
 
 
 @dataclass
