@@ -287,7 +287,7 @@ def run_dq(model_args, data_args, opt_args, fms_mo_args):
             eval_llm_1GPU(qcfg, model, test_dataset)
         else:
             model.to(torch.device("cuda:0"))
-            n_samples = int(test_dataset.input_ids.shape[1] / block_size)
+            n_samples = int(test_dataset["input_ids"].shape[1] / block_size)
             evaluator = Evaluator(test_dataset, "cuda", n_samples=n_samples)
             with patch_torch_bmm(qcfg):
                 ppl = evaluator.evaluate(model, block_size=block_size)
