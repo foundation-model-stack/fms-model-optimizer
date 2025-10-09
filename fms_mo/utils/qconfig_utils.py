@@ -940,18 +940,9 @@ def check_config(config: dict, model_dtype: torch.dtype = None) -> None:
             )
 
     # Set allowed qa_modes, qw_modes, bmm_modes
-    qa_mode_settings = [
-        "pact",
-        "pact+",
-        "pactsym",
-        "pactsym+",
-        "max",
-        "minmax",
-        "maxsym",
-        "pertokenmax",
-        "lsq+",
-        "fix",
-        "brecq",
+    shared_modes = [
+        "max_perToken",
+        "max_perCh",
         # fp8_e4m3
         "fp8_e4m3_sat",
         "fp8_e4m3_scale",
@@ -966,6 +957,23 @@ def check_config(config: dict, model_dtype: torch.dtype = None) -> None:
         "fp8_e5m2_scale_perCh",
         "fp8_e5m2_sat_perToken",
         "fp8_e5m2_scale_perToken",
+        # others
+        "_only",  # was "rot_only"
+        "no_quant",  # could be used for those nbits = 16 or 32
+    ]
+
+    qa_mode_settings = [
+        "pact",
+        "pact+",
+        "pactsym",
+        "pactsym+",
+        "max",
+        "minmax",
+        "maxsym",
+        "pertokenmax",
+        "lsq+",
+        "fix",
+        "brecq",
     ]
     qw_mode_settings = [
         "sawb",
@@ -988,20 +996,6 @@ def check_config(config: dict, model_dtype: torch.dtype = None) -> None:
         "brecq",
         "adaround",
         "pertokenmax",
-        # fp8_e4m3
-        "fp8_e4m3_sat",
-        "fp8_e4m3_scale",
-        "fp8_e4m3_sat_perCh",
-        "fp8_e4m3_scale_perCh",
-        "fp8_e4m3_sat_perToken",
-        "fp8_e4m3_scale_perToken",
-        # fp8_e5m2
-        "fp8_e5m2_sat",
-        "fp8_e5m2_scale",
-        "fp8_e5m2_sat_perCh",
-        "fp8_e5m2_scale_perCh",
-        "fp8_e5m2_sat_perToken",
-        "fp8_e5m2_scale_perToken",
     ]
     bmm_mode_settings = [
         "pact",
@@ -1011,10 +1005,6 @@ def check_config(config: dict, model_dtype: torch.dtype = None) -> None:
         "max",
         "minmax",
         "pertokenmax",
-        "fp8_e4m3_sat",
-        "fp8_e4m3_scale_perToken",
-        "fp8_e5m2_sat",
-        "fp8_e5m2_scale_perToken",
     ]
 
     # Get strings in config for qa_modes, qw_modes, bmm_modes
@@ -1049,16 +1039,16 @@ def check_config(config: dict, model_dtype: torch.dtype = None) -> None:
 
     # Check each for correct ranges
     for qa_mode_str in qa_modes_str:
-        qa_mode = config.get(qa_mode_str, "pact+")
-        if not qa_mode in (qa_mode_settings + mx_spec_config_modes):
+        qa_mode = config.get(qa_mode_str, "pact+").replace("rot_", "")
+        if not (qa_mode in (qa_mode_settings + mx_spec_config_modes) or qa_mode in shared_modes):
             raise ValueError(
                 f"{qa_mode_str} = {qa_mode} is not set to one of the following: "
                 f"{qa_mode_settings + mx_spec_config_modes}"
             )
 
     for qw_mode_str in qw_modes_str:
-        qw_mode = config.get(qw_mode_str, "sawb+")
-        if not qw_mode in (qw_mode_settings + mx_spec_config_modes):
+        qw_mode = config.get(qw_mode_str, "sawb+").replace("rot_", "")
+        if not (qw_mode in (qw_mode_settings + mx_spec_config_modes) or qw_mode in shared_modes):
             raise ValueError(
                 f"{qw_mode_str} = {qw_mode} is not set to one of the following: "
                 f"{qw_mode_settings + mx_spec_config_modes}"
@@ -1066,11 +1056,11 @@ def check_config(config: dict, model_dtype: torch.dtype = None) -> None:
 
     bmm_mode_consistency = 0  # all or none when using mx
     for bmm_mode_str in bmm_modes_str:
-        bmm_mode = config.get(bmm_mode_str, "pactsym+")
+        bmm_mode = config.get(bmm_mode_str, "pactsym+").replace("rot_", "")
         bmm_mode_consistency += bmm_mode.startswith("mx_")
         # mx_specs doesn't have 4 individual bmmX_qmY_modes, it re-uses w and a fmt instead.
         # We will keep them in qcfg (with "mx_" prefix NOT removed).
-        if not bmm_mode in (bmm_mode_settings + mx_spec_config_modes):
+        if not (bmm_mode in (bmm_mode_settings + mx_spec_config_modes) or bmm_mode in shared_modes):
             raise ValueError(
                 f"{bmm_mode_str} = {bmm_mode} is not set to one of the following: "
                 f"{bmm_mode_settings + mx_spec_config_modes}"
