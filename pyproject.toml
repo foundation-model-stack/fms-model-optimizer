@@ -25,7 +25,7 @@ dependencies = [
 "numpy>=1.26.4,<2.3.0",
 "accelerate>=0.20.3,!=0.34,<1.11",
 "transformers>=4.45,<4.58",
-"torch>=2.2.0,<2.9", 
+"torch>=2.2.0,<2.10.0", 
 "tqdm>=4.66.2,<5.0",
 "datasets>=3.0.0,<5.0",
 "pandas",
