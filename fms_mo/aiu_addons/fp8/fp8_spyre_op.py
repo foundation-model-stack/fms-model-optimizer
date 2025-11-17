@@ -60,10 +60,6 @@ def _scaled_mm_cpu_out(
     return ret
 
 
-torch.library.register_kernel(torch.ops.aten._scaled_mm.out, "cpu", _scaled_mm_cpu_out)
-
-
-@torch.library.register_kernel("aten::_scaled_mm", "cpu")
 def _scaled_mm_cpu(
     mat1: Tensor,
     mat2: Tensor,
@@ -84,6 +80,19 @@ def _scaled_mm_cpu(
         out_dtype,
         use_fast_accum,
         out=None,
+    )
+
+
+if torch.__version__ >= "2.8":
+    DispatchKey = torch._C.DispatchKey  # type: ignore[attr-defined]
+    torch.ops.aten._scaled_mm.out.py_kernels[DispatchKey.CPU] = _scaled_mm_cpu_out
+    torch.ops.aten._scaled_mm.default.py_kernels[DispatchKey.CPU] = _scaled_mm_cpu
+else:
+    torch.library.register_kernel(
+        torch.ops.aten._scaled_mm.out, "cpu", _scaled_mm_cpu_out
+    )
+    torch.library.register_kernel(
+        torch.ops.aten._scaled_mm.default, "cpu", _scaled_mm_cpu
     )
 
 
@@ -114,7 +123,7 @@ def spyre_scaled_bmm(
         device=mat1.device,
     )
     for b_idx in range(mat1.shape[0]):
-        out[b_idx] = torch._scaled_mm(
+        out[b_idx] = _scaled_mm_cpu_out(
             mat1[b_idx],
             mat2[b_idx],
             scale1,
