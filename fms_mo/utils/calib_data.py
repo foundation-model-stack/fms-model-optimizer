@@ -26,36 +26,46 @@ import random
 
 # Third Party
 from datasets import load_dataset, load_from_disk
-from transformers import AutoTokenizer, BatchEncoding
+from transformers import BatchEncoding
 import datasets
 import torch
 
 
-def return_tokenized_samples(nsamples, trainenc, seqlen, sequential=False):
+def return_tokenized_samples(
+    nsamples: int, trainenc: list, seqlen: int, sequential: bool = False
+) -> dict:
     """Randomly crop nsamples sequence from trainenc, each with the length of seqlen.
     see below functions, e.g. get_wikitext2() for more details.
     """
-    traindataset = []
+    traindataset = {
+        "input_ids": torch.zeros(size=(nsamples, seqlen), dtype=torch.int),
+        "attention_mask": torch.zeros(size=(nsamples, seqlen), dtype=torch.int),
+    }
     i = 0
 
-    for _ in range(nsamples):
+    for k in range(nsamples):
         if not sequential:
             i = random.randint(0, len(trainenc.input_ids) - seqlen - 1)
 
         j = i + seqlen
         inp = trainenc.input_ids[i:j]
         mask = trainenc.attention_mask[i:j]
-        traindataset.append(
-            {"input_ids": torch.tensor(inp), "attention_mask": torch.tensor(mask)}
-        )
+        traindataset["input_ids"][k] = torch.tensor(inp)
+        traindataset["attention_mask"][k] = torch.tensor(mask)
+
         i = j
 
     return traindataset
 
 
 def get_wikitext2(
-    nsamples, seed, seqlen, tokenizer, sequential=False, gptq_style=False
-):
+    nsamples: int,
+    seed: int,
+    seqlen: int,
+    tokenizer: str,
+    sequential: bool = False,
+    gptq_style: bool = False,
+) -> tuple[dict, dict]:
     """Prepare data for GPTQ using wikitext2 dataset.
 
     Args:
@@ -83,11 +93,22 @@ def get_wikitext2(
     traindataset = return_tokenized_samples(
         nsamples, trainenc, seqlen, sequential=sequential
     )
+    testenc = {
+        "input_ids": testenc["input_ids"],
+        "attention_mask": testenc["attention_mask"],
+    }
 
     return traindataset, testenc
 
 
-def get_ptb(nsamples, seed, seqlen, model, sequential=False, gptq_style=False):
+def get_ptb(
+    nsamples: int,
+    seed: int,
+    seqlen: int,
+    tokenizer: str,
+    sequential: bool = False,
+    gptq_style: bool = False,
+) -> tuple[dict, dict]:
     """Prepare data for GPTQ using PTB dataset.
 
     Args:
@@ -102,8 +123,6 @@ def get_ptb(nsamples, seed, seqlen, model, sequential=False, gptq_style=False):
     """
     random.seed(seed)
 
-    tokenizer = AutoTokenizer.from_pretrained(model, use_fast=True)
-
     traindata = load_dataset("ptb_text_only", "penn_treebank", split="train")
     valdata = load_dataset("ptb_text_only", "penn_treebank", split="validation")
     if gptq_style:
@@ -112,14 +131,20 @@ def get_ptb(nsamples, seed, seqlen, model, sequential=False, gptq_style=False):
         traindata = "\n\n".join(traindata["sentence"])
 
     trainenc = tokenizer(traindata)
-    testenc = tokenizer("\n\n".join(valdata["sentence"]))
+    testenc = tokenizer("\n\n".join(valdata["sentence"]), return_tensors="pt")
 
     traindataset = return_tokenized_samples(nsamples, trainenc, seqlen, sequential)
+    testenc = {
+        "input_ids": testenc["input_ids"],
+        "attention_mask": testenc["attention_mask"],
+    }
 
     return traindataset, testenc
 
 
-def get_c4_train(nsamples, seed, seqlen, tokenizer, sequential=False):
+def get_c4_train(
+    nsamples: int, seed: int, seqlen: int, tokenizer: str, sequential: bool = False
+) -> tuple[dict, dict]:
     """Prepare data for GPTQ using C4 dataset.
 
     Args:
@@ -144,8 +169,13 @@ def get_c4_train(nsamples, seed, seqlen, tokenizer, sequential=False):
         split="validation",
     )
 
-    trainloader = []
-    for _ in range(nsamples):
+    testenc = tokenizer("\n\n".join(valdata["text"]), return_tensors="pt")
+
+    trainloader = {
+        "input_ids": torch.zeros(size=(nsamples, seqlen), dtype=torch.int),
+        "attention_mask": torch.zeros(size=(nsamples, seqlen), dtype=torch.int),
+    }
+    for k in range(nsamples):
         while True:
             i = random.randint(0, len(traindata) - 1)
             trainenc = tokenizer(traindata[i]["text"])
@@ -156,19 +186,19 @@ def get_c4_train(nsamples, seed, seqlen, tokenizer, sequential=False):
         j = i + seqlen
         inp = trainenc.input_ids[i:j]
         mask = trainenc.attention_mask[i:j]
-        trainloader.append({"input_ids": inp, "attention_mask": mask})
+        trainloader["input_ids"][k] = torch.tensor(inp)
+        trainloader["attention_mask"][k] = torch.tensor(mask)
         j = i
-    testdataset = [
-        {
-            "input_ids": torch.tensor(valdata.input_ids),
-            "attention_mask": torch.tensor(valdata.attention_mask),
-        }
-    ]
+
+    testdataset = {
+        "input_ids": testenc["input_ids"],
+        "attention_mask": testenc["attention_mask"],
+    }
 
     return trainloader, testdataset
 
 
-def get_c4_new(nsamples, seed, seqlen, tokenizer):
+def get_c4_new(nsamples: int, seed: int, seqlen: int, tokenizer: str):
     """Prepare data for GPTQ using C4 dataset.
 
     Args:
@@ -213,8 +243,8 @@ def get_c4_new(nsamples, seed, seqlen, tokenizer):
 
 
 def get_self_instruct_starcoder(
-    nsamples, seed, seqlen, tokenizer, split_name="curated"
-):  # pylint: disable=unused-argument
+    nsamples: int, seed: int, seqlen: int, tokenizer: str, split_name: str = "curated"
+) -> tuple[dict, dict]:  # pylint: disable=unused-argument
     """Prepare data for GPTQ using starcoder dataset.
 
     Args:
@@ -229,23 +259,42 @@ def get_self_instruct_starcoder(
     cr_dataset = load_dataset("codeparrot/self-instruct-starcoder", split=split_name)
 
     eval_dataset = tokenizer(" ".join(cr_dataset[:]["output"]), return_tensors="pt")
+    eval_dataset = {
+        "input_ids": eval_dataset["input_ids"],
+        "attention_mask": eval_dataset["attention_mask"],
+    }
+
     cr_dataset.shuffle(seed)
     nsamples = min(nsamples, len(cr_dataset))
-    trainloader = []
-    for i in range(nsamples):
-        tokenized = tokenizer(cr_dataset[i]["output"], return_tensors="pt")
-        trainloader.append(
-            {
-                "input_ids": tokenized.input_ids.squeeze(0),
-                "attention_mask": tokenized.attention_mask.squeeze(0),
-            }
+
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    trainloader = {
+        "input_ids": torch.zeros(size=(nsamples, seqlen), dtype=torch.int),
+        "attention_mask": torch.zeros(size=(nsamples, seqlen), dtype=torch.int),
+    }
+    for k in range(nsamples):
+        tokenized = tokenizer(
+            cr_dataset[k]["output"],
+            return_tensors="pt",
+            padding="max_length",
+            max_length=seqlen,
         )
+        trainloader["input_ids"][k] = tokenized.input_ids.squeeze(0)
+        trainloader["attention_mask"][k] = tokenized.attention_mask.squeeze(0)
+
     return trainloader, eval_dataset
 
 
 def get_cobol_java_supervised(
-    nsamples, seed, model, seqlen=8192, split_name="both", file_path=None
-):
+    nsamples: int,
+    seed: int,
+    seqlen: int = 8192,
+    tokenizer: str = "",
+    split_name: str = "both",
+    file_path: str = None,
+) -> tuple[dict, dict]:
     """Prepare data for GPTQ using cobol/java dataset.
 
     Args:
@@ -265,13 +314,21 @@ def get_cobol_java_supervised(
         raw_data = f.readlines()
 
     data_dict_array = [json.loads(line) for line in raw_data]
-    random.shuffle(data_dict_array)
 
-    tokenizer = AutoTokenizer.from_pretrained(model, use_fast=True)
+    eval_dataset = tokenizer(data_dict_array["content"], return_tensors="pt")
+    eval_dataset = {
+        "input_ids": eval_dataset["input_ids"],
+        "attention_mask": eval_dataset["attention_mask"],
+    }
+
+    random.shuffle(data_dict_array)
 
     nsamples = min(nsamples, len(data_dict_array))
 
-    trainloader = []
+    trainloader = {
+        "input_ids": torch.zeros(size=(nsamples, seqlen), dtype=torch.int),
+        "attention_mask": torch.zeros(size=(nsamples, seqlen), dtype=torch.int),
+    }
     added_ex = 0
 
     while added_ex < nsamples:
@@ -300,28 +357,24 @@ def get_cobol_java_supervised(
         inputs = inputs[i:j]
 
         tokenized = tokenizer(inputs, return_tensors="pt")
-        trainloader.append(
-            {
-                "input_ids": tokenized.input_ids,
-                "attention_mask": tokenized.attention_mask,
-            }
-        )
+        trainloader["input_ids"][added_ex] = tokenized.input_ids.squeeze(0)
+        trainloader["attention_mask"][added_ex] = tokenized.attention_mask.squeeze(0)
 
         added_ex += 1
 
-    return trainloader, None
+    return trainloader, eval_dataset
 
 
 def get_tokenized_data(
-    name,
-    nsamples=128,
-    seqlen=2048,
-    tokenizer="",
-    seed=0,
-    gptq_style=False,
-    path_to_save=None,
-    field_name=None,
-):
+    name: str,
+    nsamples: int = 128,
+    seqlen: int = 2048,
+    tokenizer: str = "",
+    seed: int = 0,
+    gptq_style: bool = False,
+    path_to_save: str = None,
+    field_name: str = None,
+) -> tuple[dict, dict]:
     """Convenient function to get data. Default to get_wikitext2."""
 
     # Option 1: User provide a dataset from disk, only need to tokenize and format it.
@@ -390,6 +443,13 @@ def get_tokenized_data(
         traindataset, testdataset = get_self_instruct_starcoder(
             nsamples, seed, seqlen, tokenizer, split_name="curated"
         )
+    elif "java" in name:
+        traindataset, testdataset = get_cobol_java_supervised(
+            nsamples,
+            seed,
+            seqlen,
+            tokenizer,
+        )
     else:
         raise NotImplementedError(
             f"Dataset {name} is not implemented yet. Please refer to get_wikitext2() and implement"
@@ -397,7 +457,7 @@ def get_tokenized_data(
         )
 
     if path_to_save:
-        datasets.Dataset.from_list(traindataset).save_to_disk(path_to_save + "_train")
+        datasets.Dataset.from_dict(traindataset).save_to_disk(path_to_save + "_train")
         if isinstance(testdataset, BatchEncoding):
             if not os.path.exists(path_to_save + "_test"):
                 os.mkdir(path_to_save + "_test")

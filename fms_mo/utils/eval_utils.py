@@ -45,7 +45,7 @@ def eval_llm_1GPU(qcfg, model, test_dataset, pre_cache_func=None, **kwargs):  # 
     qcfg["batch_size"] = 1  # for dataloading, always use batch_size of 1
     qcfg["dtype"] = next(iter(model.parameters())).dtype
     seq_len = qcfg["seq_len"]
-    qcfg["n_samples"] = int(test_dataset.input_ids.shape[1] / seq_len)
+    qcfg["n_samples"] = int(test_dataset["input_ids"].shape[1] / seq_len)
     # --- Phase 0 cache the inputs of the block0---
     use_cache = model.config.use_cache
     model.config.use_cache = False
@@ -116,9 +116,9 @@ def eval_llm_1GPU(qcfg, model, test_dataset, pre_cache_func=None, **kwargs):  # 
 
         # Shift so that tokens < n predict n
         shift_logits = lm_logits[:, :-1, :].contiguous().float()
-        shift_labels = test_dataset.input_ids[:, (i * seq_len) : ((i + 1) * seq_len)][
-            :, 1:
-        ].to(dev)
+        shift_labels = test_dataset["input_ids"][
+            :, (i * seq_len) : ((i + 1) * seq_len)
+        ][:, 1:].to(dev)
         loss_fct = nn.CrossEntropyLoss()
         loss = loss_fct(
             shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
@@ -144,7 +144,7 @@ class Evaluator:
         self.dataset = dataset
         self.device = device
         # loading tokenized dataset.
-        self.dataset = dataset.input_ids.to(device)
+        self.dataset = dataset["input_ids"].to(device)
         self.n_samples = n_samples
 
     @torch.no_grad()
