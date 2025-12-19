@@ -35,7 +35,7 @@ dependencies = [
 
 [project.optional-dependencies]
 examples = ["ninja>=1.11.1.1,<2.0", "evaluate", "huggingface_hub"]
-fp8 = ["llmcompressor", "torchao==0.11"]
+fp8 = ["llmcompressor", "torchao==0.15.0"]
 gptq = ["Cython", "gptqmodel>=1.7.3"]
 mx = ["microxcaling>=1.1"]
 opt = ["fms-model-optimizer[fp8, gptq, mx]"]
