@@ -23,6 +23,7 @@ General utils for fms_mo
 
 # Standard
 from contextlib import ExitStack, contextmanager
+from functools import partial
 from typing import Any, Callable, Dict, List, Tuple, Union
 from unittest import mock
 import logging
@@ -71,7 +72,12 @@ def move_to(obj, device):
     return obj
 
 
-def mockbmm(mat1, mat2, default_to_torch=False):
+def mockbmm(
+    mat1,
+    mat2,
+    default_to_torch=False,
+    target_line_num=[0],
+):
     """
     This function is used to mock the behavior of the bmm function in PyTorch.
     It is used to work around the fact that the bmm function in PyTorch is not
@@ -87,7 +93,9 @@ def mockbmm(mat1, mat2, default_to_torch=False):
     cf = sys._getframe()
     qbmm_mod = None
     qbmm_lineno = cf.f_back.f_lineno
-    while cf.f_back and qbmm_mod is None:
+    if qbmm_lineno not in target_line_num:
+        default_to_torch = True
+    while (not default_to_torch) and cf.f_back and qbmm_mod is None:
         # First frame is QBmm's forward itself, can start searching from previous stack
         cf = cf.f_back
         if (
@@ -102,13 +110,21 @@ def mockbmm(mat1, mat2, default_to_torch=False):
     return qbmm_mod(mat1, mat2)
 
 
-def mockmatmul(mat1, mat2, default_to_torch=False):
+def mockmatmul(
+    mat1,
+    mat2,
+    default_to_torch=False,
+    target_line_num=[0],
+):
     """
     Patches torch.matmul() with QBmm( torch.bmm() )
 
     Args:
         mat1 (torch.Tensor): The first matrix to be multiplied.
         mat2 (torch.Tensor): The second matrix to be multiplied.
+        target_bmm_lineno: Only patch matmul/bmm on the line number previously found by qmodel_prep.
+                            i.e., matmuls/bmms other than self-attn will not be patched.
+                            => need to make sure qmodel_prep only found 2.
 
     Returns:
         torch.Tensor: The result of the mock matrix multiplication.
@@ -124,7 +140,9 @@ def mockmatmul(mat1, mat2, default_to_torch=False):
     cf = sys._getframe()
     qbmm_mod = None
     qbmm_lineno = cf.f_back.f_lineno
-    while cf.f_back and qbmm_mod is None:
+    if qbmm_lineno not in target_line_num:
+        default_to_torch = True
+    while (not default_to_torch) and cf.f_back and qbmm_mod is None:
         cf = cf.f_back
         if (
             "forward" in cf.f_code.co_name or "_attn" in cf.f_code.co_name
@@ -134,16 +152,17 @@ def mockmatmul(mat1, mat2, default_to_torch=False):
             qbmm_mod = getattr(mod_calling_bmm_function, f"QBmm{qbmm_lineno}", None)
     del cf
 
-    # Didn't find the corresponding QBmm, default the call to torch.bmm
+    # Didn't find the corresponding QBmm, default the call to torch.bmm, which only accepts 3D
     if qbmm_mod is None and default_to_torch:
-        org_batch_header = mat1.shape[:2]
-        # Need to double check m1/m2 are 3d, otherwise reshape
-        if len(mat1.shape) > 3:
+        # Need to reshape if inputs are 2d or 4d
+        if len(mat1.shape) == len(mat2.shape) and len(mat2.shape) in [2, 4]:
+            tar_shape = [mat1.shape[-2], mat1.shape[-1]]
+            if len(mat1.shape) == 4:
+                tar_shape = mat1.shape[:2] + tar_shape
             mat1 = mat1.reshape([-1, mat1.shape[-2], mat1.shape[-1]])
-        if len(mat2.shape) > 3:
             mat2 = mat2.reshape([-1, mat2.shape[-2], mat2.shape[-1]])
         output = torch.bmm(mat1, mat2)
-        output = output.reshape([*org_batch_header, *output.shape[1:]])
+        output = output.reshape(tar_shape)
         return output
     return qbmm_mod(mat1, mat2)
 
@@ -158,13 +177,14 @@ def patch_torch_bmm(qcfg):
     if qcfg is not None:
         # could be 'torch.bmm', 'torch.matmul', or None
         ops_to_patch = qcfg.get("which2patch_contextmanager", None)
+        tar_ln = list(qcfg["bmm_prep"]["layers_with_bmm"].values())[0]
         # if qcfg["bmm_prep"]["bmm_only_in_self_attn"] is False, may need to enable default_to_torch
         # in mock functions, e.g. partial(mockmatmul, default_to_torch=True)
         # This is in case a model uses extra matmuls, and QBmmXXX is not found or attached properly.
         new_target = (
-            mockbmm
+            partial(mockbmm, target_line_num=tar_ln)
             if ops_to_patch == "torch.bmm"
-            else mockmatmul
+            else partial(mockmatmul, target_line_num=tar_ln)
             if ops_to_patch == "torch.matmul"
             else None
         )

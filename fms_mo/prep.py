@@ -231,7 +231,7 @@ def make_quant_module(module, curr_full_name, qcfg, verbose=False):
         base_params = {}
         if hasattr(module, "__constants__"):
             base_params = {k: getattr(module, k) for k in module.__constants__}
-            base_params["bias"] = module.bias is not None
+            base_params["bias"] = getattr(module, "bias", None) is not None
         base_params["device"] = "meta"
 
     module_output = module
@@ -504,6 +504,12 @@ def make_quant_module(module, curr_full_name, qcfg, verbose=False):
             if getattr(module, k, None):
                 setattr(module_output, k, v)
         module_output._all_weights = module._all_weights
+
+    # For nn.Embedding
+    elif isinstance(module, nn.Embedding):
+        # simplest case, only support rotation for now, no quantization
+        Qemb = mapping.get(nn.Embedding, nn.Embedding)
+        module_output = Qemb(module)
 
     return module_output
 
