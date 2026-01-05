@@ -22,7 +22,7 @@ classifiers=[
 ]
 dynamic = ["version"]
 dependencies = [
-"numpy>=1.26.4,<2.3.0",
+"numpy>=1.26.4,<2.5.0",
 "accelerate>=0.20.3,!=0.34,<1.11",
 "transformers>=4.45,<4.58",
 "torch>=2.2.0,<2.10.0", 
