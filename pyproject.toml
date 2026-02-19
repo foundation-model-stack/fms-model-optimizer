@@ -25,7 +25,7 @@ dependencies = [
 "numpy>=1.26.4,<2.3.0",
 "accelerate>=0.20.3,!=0.34,<1.11",
 "transformers>=4.45,<4.58",
-"torch>=2.2.0,<2.10.0", 
+"torch>=2.2.0,<2.11.0",
 "tqdm>=4.66.2,<5.0",
 "datasets>=3.0.0,<5.0",
 "pandas",
@@ -60,7 +60,7 @@ version_file = "fms_mo/_version.py"
 # Version strings are formatted as `{version}+{local}`, e.g. "0.1.dev1+gb1a7032"
 # Local versioning is incompatible with pypi, so we disable it by default.
 local_scheme = "no-local-version"
-# For more version configuration, see 
+# For more version configuration, see
 # https://setuptools-scm.readthedocs.io/en/latest/config/
 
 [tool.setuptools.packages.find]
