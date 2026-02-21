@@ -82,7 +82,13 @@ class QBmm(nn.Module):
         self.m2_bounded = m2_bounded
         self.qm1_mode = qm1_mode
         self.qm2_mode = qm2_mode
-
+        self.smooth_attn= qcfg.get("smooth_attn", False)
+        self.smooth_attn_alpha = qcfg.get("smooth_attn_alpha", 0.5)
+        if self.smooth_attn_alpha < 0 or self.smooth_attn_alpha > 1:
+            raise ValueError(
+                "smooth_attn_alpha must be in range [0,1] "
+                f"(given: {self.smooth_attn_alpha})"
+            )
         self.m1_clip_init_val = kwargs.get(
             "m1_clip_init_val", qcfg.get("m1_clip_init_val", 1.0)
         )
@@ -191,6 +197,12 @@ class QBmm(nn.Module):
         Returns:
             torch.Tensor: Output tensor after quantized bmm.
         """
+        if self.smooth_attn:
+            attn_scales= m2.abs().amax(dim=(0,1,3)).clamp(min=1e-5)
+            attn_scales = attn_scales.pow(self.smooth_attn_alpha)
+            m1 *= attn_scales
+            m2 /= attn_scales.reshape(1,1,m2.shape[2], 1)
+
         # pylint: disable = access-member-before-definition
         if self.calib_counter > 0:
             with torch.no_grad():
