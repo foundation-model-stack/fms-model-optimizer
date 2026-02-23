@@ -20,6 +20,7 @@ import torch
 
 # Local
 from fms_mo.quant.quantizers import Qbypass, Qdynamic, get_activation_quantizer
+from fms_mo.quant.rotation import RotQuantWrapper
 from fms_mo.utils.import_utils import available_packages
 
 
@@ -132,8 +133,10 @@ class QBmm(nn.Module):
                 )
 
         self.calib_iterator = []  # To simplify update of clipvals in forward()
-        self.quantize_m1 = Qbypass()
-        self.quantize_calib_m1 = Qbypass()
+        quant_m1_def = Qbypass() if "rot_" not in self.qm1_mode else RotQuantWrapper()
+        quant_m2_def = Qbypass() if "rot_" not in self.qm2_mode else RotQuantWrapper()
+        self.quantize_m1 = quant_m1_def
+        self.quantize_calib_m1 = quant_m1_def
         if self.num_bits_m1 not in [32, 16]:
             self.quantize_m1 = get_activation_quantizer(
                 self.qm1_mode if (not m1_bounded or "fp8" in qm1_mode) else "minmax",
@@ -156,8 +159,8 @@ class QBmm(nn.Module):
                     symmetric=self.symmetric,
                 )
 
-        self.quantize_m2 = Qbypass()
-        self.quantize_calib_m2 = Qbypass()
+        self.quantize_m2 = quant_m2_def
+        self.quantize_calib_m2 = quant_m2_def
         if self.num_bits_m2 not in [32, 16]:
             self.quantize_m2 = get_activation_quantizer(
                 self.qm2_mode if (not m2_bounded or "fp8" in qm2_mode) else "minmax",
