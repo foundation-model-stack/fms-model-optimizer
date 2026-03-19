@@ -29,7 +29,7 @@ from fms_mo.prep import available_packages
 # open issue in PyLint: https://github.com/pytorch/pytorch/issues/119482
 
 TORCH_VERSION = Version(torch.__version__.split("+")[0])
-SUPPORTS_CPU_PER_CHANNEL_FP8 = TORCH_VERSION < Version("2.10")
+SUPPORTS_CPU_PER_CHANNEL_FP8 = Version("2.10") > TORCH_VERSION
 
 # Gated torchao imports for FP8 implementation
 if available_packages["fms"] and available_packages["torchao"]:
@@ -245,8 +245,8 @@ if available_packages["fms"] and available_packages["torchao"]:
                 # Check if we need CPU fallback for per-channel quantization
                 is_cpu = qx.device.type == "cpu"
                 is_per_tensor = (
-                    self.linear_config["weights"]["strategy"] == "tensor" and
-                    self.linear_config["input_activations"]["strategy"] == "tensor"
+                    self.linear_config["weights"]["strategy"] == "tensor"
+                    and self.linear_config["input_activations"]["strategy"] == "tensor"
                 )
 
                 # Perform mock FP8xFP8 matmul
@@ -254,7 +254,9 @@ if available_packages["fms"] and available_packages["torchao"]:
                     x_dequant = qx.dequantize()
                     w_dequant = qweight.dequantize()
                     out = torch.nn.functional.linear(
-                        x_dequant.to(w_dequant.dtype), w_dequant, self.bias if self.has_bias else None
+                        x_dequant.to(w_dequant.dtype),
+                        w_dequant,
+                        self.bias if self.has_bias else None,
                     )
                     return out.to(x.dtype)
 
