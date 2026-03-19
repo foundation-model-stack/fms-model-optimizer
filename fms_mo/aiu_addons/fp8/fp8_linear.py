@@ -302,10 +302,11 @@ if available_packages["fms"] and available_packages["torchao"]:
                 ).reshape(out_shape)
 
             # activations not quantized, dequant fp8 weight and do regular matmul
+            w_dequant = qweight.dequantize()
             out = torch.nn.functional.linear(
-                x, qweight.dequantize(), self.bias if self.has_bias else None
+                x.to(w_dequant.dtype), w_dequant, self.bias if self.has_bias else None
             )
-            return out
+            return out.to(x.dtype)
 
         def __repr__(self) -> str:
             return (
