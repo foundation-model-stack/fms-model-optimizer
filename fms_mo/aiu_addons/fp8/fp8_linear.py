@@ -14,6 +14,7 @@
 """Implement FP8 linear module to be loaded via FMS."""
 
 # Standard
+from importlib.metadata import version
 from typing import Any, Mapping
 
 # Third Party
@@ -33,6 +34,8 @@ SUPPORTS_CPU_PER_CHANNEL_FP8 = Version("2.10") > TORCH_VERSION
 
 # Gated torchao imports for FP8 implementation
 if available_packages["fms"] and available_packages["torchao"]:
+    TORCHAO_VERSION = Version(version("torchao"))
+
     # Third Party
     from fms.modules.linear import (
         LinearModuleShardingInfo,
@@ -251,6 +254,11 @@ if available_packages["fms"] and available_packages["torchao"]:
 
                 # Perform mock FP8xFP8 matmul
                 if is_cpu and not is_per_tensor and not SUPPORTS_CPU_PER_CHANNEL_FP8:
+                    if Version("0.11") < TORCHAO_VERSION:
+                        raise NotImplementedError(
+                            "Fallback path for FP8 matmul on CPU is not supported "
+                            "on torchao > 0.11."
+                        )
                     x_dequant = qx.dequantize()
                     w_dequant = qweight.dequantize()
                     out = torch.nn.functional.linear(
