@@ -151,7 +151,7 @@ def test_fp8_op() -> None:
         ("channel", "token"),  # Per-channel W + per-token dynamic A
     ],
 )
-def test_fp8_linear_cpu_support(
+def test_fp8_linear_cpu_support(  # pylint: disable=redefined-outer-name
     weight_strategy: str,
     activation_strategy: str,
     fp8_test_dimensions: dict,
@@ -225,7 +225,7 @@ def test_fp8_linear_cpu_support(
     not available_packages["torchao"] or not available_packages["fms"],
     reason="FMS and torchao required to run this test",
 )
-def test_fp8_linear_cpu_no_activation_quantization(fp8_test_dimensions: dict) -> None:
+def test_fp8_linear_cpu_no_activation_quantization(fp8_test_dimensions: dict) -> None:  # pylint: disable=redefined-outer-name
     """Test FP8Linear on CPU with only weight quantization (no activation quantization).
 
     This tests the code path where activations are not quantized but weights are FP8.
