@@ -21,6 +21,117 @@ import torch
 from fms_mo.prep import available_packages
 import fms_mo.aiu_addons.fp8.fp8_spyre_op  # pylint: disable=unused-import
 
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+
+def initialize_fp8_weights(
+    fp8_linear,
+    weight_strategy: str,
+    in_features: int,
+    out_features: int,
+) -> None:
+    """Initialize FP8Linear weights with proper absmax scaling.
+
+    Args:
+        fp8_linear: FP8Linear module to initialize
+        weight_strategy: "tensor" or "channel" for weight quantization
+        in_features: Input feature dimension
+        out_features: Output feature dimension
+    """
+    with torch.no_grad():
+        # Create random float weights
+        float_weights = torch.randn(out_features, in_features)
+
+        # Calculate FP8 E4M3 max value (448.0)
+        fp8_max = torch.finfo(torch.float8_e4m3fn).max
+
+        # Set appropriate scales based on strategy using absmax
+        if weight_strategy == "tensor":
+            # Per-tensor: single scale for entire weight matrix
+            absmax = float_weights.abs().max()
+            scale = absmax / fp8_max
+            # Ensure scale is not zero
+            scale = torch.clamp(scale, min=1e-12)
+            fp8_linear.weight_scale.fill_(scale.item())
+        else:  # channel (per-row for weight matrix)
+            # Per-channel: one scale per output channel (row)
+            absmax = float_weights.abs().amax(dim=1)
+            scale = absmax / fp8_max
+            # Ensure scales are not zero
+            scale = torch.clamp(scale, min=1e-12)
+            # Reshape to match weight_scale parameter shape (out_features, 1)
+            fp8_linear.weight_scale.copy_(scale.reshape(-1, 1))
+
+        # Quantize weights to FP8
+        quantized_weights = (float_weights / fp8_linear.weight_scale).clamp(
+            -fp8_max, fp8_max
+        )
+        fp8_linear.weight.copy_(quantized_weights.to(torch.float8_e4m3fn))
+
+        # Initialize bias if present
+        if fp8_linear.has_bias:
+            fp8_linear.bias.copy_(torch.randn(out_features))
+
+
+def initialize_fp8_input_scale(
+    fp8_linear,
+    activation_strategy: str,
+    batch_size: int,
+    seq_len: int,
+    in_features: int,
+) -> None:
+    """Initialize static input scale for FP8Linear.
+
+    Args:
+        fp8_linear: FP8Linear module to initialize
+        activation_strategy: "tensor" or "token" for activation quantization
+        batch_size: Batch size for sample input
+        seq_len: Sequence length for sample input
+        in_features: Input feature dimension
+    """
+    with torch.no_grad():
+        # For static quantization, use a representative input to calculate scales
+        sample_input = torch.randn(batch_size, seq_len, in_features)
+        fp8_max = torch.finfo(torch.float8_e4m3fn).max
+
+        if activation_strategy == "tensor":
+            # Per-tensor: single scale for entire activation
+            absmax = sample_input.abs().max()
+            scale = absmax / fp8_max
+            scale = torch.clamp(scale, min=1e-12)
+            fp8_linear.input_scale.fill_(scale.item())
+        else:  # token
+            # For per-token static quantization, use a calibrated scale
+            # based on representative input statistics
+            absmax = sample_input.abs().max()
+            scale = absmax / fp8_max
+            scale = torch.clamp(scale, min=1e-12)
+            # Fill all scales with the same representative value
+            fp8_linear.input_scale.fill_(scale.item())
+
+
+# ============================================================================
+# Pytest Fixtures
+# ============================================================================
+
+
+@pytest.fixture
+def fp8_test_dimensions():
+    """Common test dimensions for FP8Linear tests."""
+    return {
+        "batch_size": 2,
+        "seq_len": 4,
+        "in_features": 8,
+        "out_features": 16,
+    }
+
+
+# ============================================================================
+# Tests
+# ============================================================================
+
 
 def test_fp8_registration() -> None:
     """
@@ -44,9 +155,10 @@ def test_fp8_registration() -> None:
     reason="FP8 is only available on GPUs with device level 8.9 or higher",
 )
 def test_fp8_op() -> None:
-    """Validate output shapes of GPTQ W4A16 tensors.
-    Note: this AIU-compatible operation only returns a zero tensor of the
-    expected shape, it does not perform a real W4A16 matmul operation.
+    """Validate output shapes of FP8 attention operation.
+
+    Tests the FP8 attention compute operation to ensure it produces
+    outputs with the expected shape.
     """
     # Local
     from fms_mo.aiu_addons.fp8.fp8_attn import _math_fp8_compute_op
@@ -57,3 +169,148 @@ def test_fp8_op() -> None:
 
     out = _math_fp8_compute_op(query, key, value, 32, 32, 0.0, None)
     assert out.size() == query.size()
+
+
+@pytest.mark.skipif(
+    not available_packages["torchao"] or not available_packages["fms"],
+    reason="FMS and torchao required to run this test",
+)
+@pytest.mark.parametrize(
+    "weight_strategy,activation_strategy,dynamic_activation",
+    [
+        ("tensor", "tensor", True),  # Per-tensor weights + per-tensor activations
+        ("tensor", "token", True),  # Per-tensor weights + per-token activations
+        ("channel", "tensor", True),  # Per-channel weights + per-tensor activations
+        ("channel", "token", True),  # Per-channel weights + per-token activations
+    ],
+)
+def test_fp8_linear_cpu_support(
+    weight_strategy: str,
+    activation_strategy: str,
+    dynamic_activation: bool,
+    fp8_test_dimensions: dict,
+) -> None:
+    """Test FP8Linear on CPU with different quantization strategies.
+
+    This test ensures that FP8Linear works correctly on CPU, including:
+    - Per-tensor quantization (native support in PyTorch 2.10+)
+    - Per-channel/per-token quantization (uses fallback path in PyTorch 2.10+)
+
+    Note: PyTorch 2.10+ only supports per-tensor FP8 matmul on CPU. Per-channel
+    and per-token quantization require a fallback to dequantize + regular matmul.
+
+    Args:
+        weight_strategy: "tensor" or "channel" for weight quantization
+        activation_strategy: "tensor" or "token" for activation quantization
+        dynamic_activation: Whether to use dynamic activation quantization
+        fp8_test_dimensions: Test dimensions fixture
+    """
+    # Local
+    from fms_mo.aiu_addons.fp8.fp8_linear import FP8Linear
+
+    # Get test dimensions
+    batch_size = fp8_test_dimensions["batch_size"]
+    seq_len = fp8_test_dimensions["seq_len"]
+    in_features = fp8_test_dimensions["in_features"]
+    out_features = fp8_test_dimensions["out_features"]
+
+    # Create FP8Linear configuration
+    linear_config = {
+        "weights": {
+            "strategy": weight_strategy,
+            "symmetric": True,
+            "dynamic": False,
+        },
+        "input_activations": {
+            "strategy": activation_strategy,
+            "symmetric": True,
+            "dynamic": dynamic_activation,
+        },
+    }
+
+    # Create FP8Linear module
+    fp8_linear = FP8Linear(
+        in_features=in_features,
+        out_features=out_features,
+        bias=True,
+        linear_config=linear_config,
+    )
+
+    # Initialize weights using helper function
+    initialize_fp8_weights(fp8_linear, weight_strategy, in_features, out_features)
+
+    # Initialize input scale if static quantization
+    if not dynamic_activation:
+        initialize_fp8_input_scale(
+            fp8_linear, activation_strategy, batch_size, seq_len, in_features
+        )
+
+    # Create input tensor on CPU
+    x = torch.randn(batch_size, seq_len, in_features, dtype=torch.bfloat16)
+
+    # Run forward pass - should not raise an error
+    output = fp8_linear(x)
+
+    # Validate output shape
+    assert output.shape == (batch_size, seq_len, out_features)
+
+    # Validate output is not NaN or Inf
+    assert not torch.isnan(output).any()
+    assert not torch.isinf(output).any()
+
+    # Validate output dtype matches input dtype
+    assert output.dtype == x.dtype
+
+
+@pytest.mark.skipif(
+    not available_packages["torchao"] or not available_packages["fms"],
+    reason="FMS and torchao required to run this test",
+)
+def test_fp8_linear_cpu_no_activation_quantization(fp8_test_dimensions: dict) -> None:
+    """Test FP8Linear on CPU with only weight quantization (no activation quantization).
+
+    This tests the code path where activations are not quantized but weights are FP8.
+
+    Args:
+        fp8_test_dimensions: Test dimensions fixture
+    """
+    # Local
+    from fms_mo.aiu_addons.fp8.fp8_linear import FP8Linear
+
+    # Get test dimensions
+    batch_size = fp8_test_dimensions["batch_size"]
+    seq_len = fp8_test_dimensions["seq_len"]
+    in_features = fp8_test_dimensions["in_features"]
+    out_features = fp8_test_dimensions["out_features"]
+
+    # Create FP8Linear configuration with no activation quantization
+    linear_config = {
+        "weights": {
+            "strategy": "channel",
+            "symmetric": True,
+            "dynamic": False,
+        },
+        "input_activations": None,  # No activation quantization
+    }
+
+    # Create FP8Linear module
+    fp8_linear = FP8Linear(
+        in_features=in_features,
+        out_features=out_features,
+        bias=True,
+        linear_config=linear_config,
+    )
+
+    # Initialize weights using helper function
+    initialize_fp8_weights(fp8_linear, "channel", in_features, out_features)
+
+    # Create input tensor on CPU
+    x = torch.randn(batch_size, seq_len, in_features, dtype=torch.bfloat16)
+
+    # Run forward pass
+    output = fp8_linear(x)
+
+    # Validate output
+    assert output.shape == (batch_size, seq_len, out_features)
+    assert not torch.isnan(output).any()
+    assert not torch.isinf(output).any()
