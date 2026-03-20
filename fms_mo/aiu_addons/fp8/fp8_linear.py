@@ -34,7 +34,6 @@ SUPPORTS_CPU_PER_CHANNEL_FP8 = Version("2.10") > TORCH_VERSION
 
 # Gated torchao imports for FP8 implementation
 if available_packages["fms"] and available_packages["torchao"]:
-    TORCHAO_VERSION = Version(version("torchao"))
 
     # Third Party
     from fms.modules.linear import (
@@ -254,7 +253,8 @@ if available_packages["fms"] and available_packages["torchao"]:
 
                 # Perform mock FP8xFP8 matmul
                 if is_cpu and not is_per_tensor and not SUPPORTS_CPU_PER_CHANNEL_FP8:
-                    if Version("0.11") < TORCHAO_VERSION:
+                    # Check torchao version without loading the full package
+                    if Version("0.11") < Version(version("torchao")):
                         raise NotImplementedError(
                             "Fallback path for FP8 matmul on CPU is not supported "
                             "on torchao > 0.11."

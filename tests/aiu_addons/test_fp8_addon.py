@@ -22,6 +22,13 @@ from fms_mo.prep import available_packages
 import fms_mo.aiu_addons.fp8.fp8_spyre_op  # pylint: disable=unused-import
 
 # ============================================================================
+# Constants
+# ============================================================================
+
+# FP8 E4M3 maximum value
+FP8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
+
+# ============================================================================
 # Helper Functions
 # ============================================================================
 
@@ -44,21 +51,18 @@ def initialize_fp8_weights(
         # Create random float weights
         float_weights = torch.randn(out_features, in_features)
 
-        # Calculate FP8 E4M3 max value (448.0)
-        fp8_max = torch.finfo(torch.float8_e4m3fn).max
-
         # Set appropriate scales based on strategy using absmax
         if weight_strategy == "tensor":
             # Per-tensor: single scale for entire weight matrix
             absmax = float_weights.abs().max()
-            scale = absmax / fp8_max
+            scale = absmax / FP8_E4M3_MAX
             # Ensure scale is not zero
             scale = torch.clamp(scale, min=1e-12)
             fp8_linear.weight_scale.fill_(scale.item())
         else:  # channel (per-row for weight matrix)
             # Per-channel: one scale per output channel (row)
             absmax = float_weights.abs().amax(dim=1)
-            scale = absmax / fp8_max
+            scale = absmax / FP8_E4M3_MAX
             # Ensure scales are not zero
             scale = torch.clamp(scale, min=1e-12)
             # Reshape to match weight_scale parameter shape (out_features, 1)
@@ -66,7 +70,7 @@ def initialize_fp8_weights(
 
         # Quantize weights to FP8
         quantized_weights = (float_weights / fp8_linear.weight_scale).clamp(
-            -fp8_max, fp8_max
+            -FP8_E4M3_MAX, FP8_E4M3_MAX
         )
         fp8_linear.weight.copy_(quantized_weights.to(torch.float8_e4m3fn))
 
@@ -94,19 +98,18 @@ def initialize_fp8_input_scale(
     with torch.no_grad():
         # For static quantization, use a representative input to calculate scales
         sample_input = torch.randn(batch_size, seq_len, in_features)
-        fp8_max = torch.finfo(torch.float8_e4m3fn).max
 
         if activation_strategy == "tensor":
             # Per-tensor: single scale for entire activation
             absmax = sample_input.abs().max()
-            scale = absmax / fp8_max
+            scale = absmax / FP8_E4M3_MAX
             scale = torch.clamp(scale, min=1e-12)
             fp8_linear.input_scale.fill_(scale.item())
         else:  # token
             # For per-token static quantization, use a calibrated scale
             # based on representative input statistics
             absmax = sample_input.abs().max()
-            scale = absmax / fp8_max
+            scale = absmax / FP8_E4M3_MAX
             scale = torch.clamp(scale, min=1e-12)
             # Fill all scales with the same representative value
             fp8_linear.input_scale.fill_(scale.item())
