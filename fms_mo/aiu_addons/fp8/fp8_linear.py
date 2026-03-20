@@ -34,7 +34,6 @@ SUPPORTS_CPU_PER_CHANNEL_FP8 = Version("2.10") > TORCH_VERSION
 
 # Gated torchao imports for FP8 implementation
 if available_packages["fms"] and available_packages["torchao"]:
-
     # Third Party
     from fms.modules.linear import (
         LinearModuleShardingInfo,
