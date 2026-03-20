@@ -14,9 +14,11 @@
 """Implement FP8 linear module to be loaded via FMS."""
 
 # Standard
+from importlib.metadata import version
 from typing import Any, Mapping
 
 # Third Party
+from packaging.version import Version
 import torch
 
 # Local
@@ -26,6 +28,9 @@ from fms_mo.prep import available_packages
 # pylint: disable=not-callable
 # torch.nn.functional.linear not recognized as callable
 # open issue in PyLint: https://github.com/pytorch/pytorch/issues/119482
+
+TORCH_VERSION = Version(torch.__version__.split("+")[0])
+SUPPORTS_CPU_PER_CHANNEL_FP8 = Version("2.10") > TORCH_VERSION
 
 # Gated torchao imports for FP8 implementation
 if available_packages["fms"] and available_packages["torchao"]:
@@ -213,7 +218,11 @@ if available_packages["fms"] and available_packages["torchao"]:
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             """If input quantization is active, compute FP8xFP8 addmm leveraging torchao
-            functionalities. Otherwise compute non-quantized addmm."""
+            functionalities. Otherwise compute non-quantized addmm.
+
+            In Pytorch 2.10, torch._scale_mm only supports FP8 on CPU when
+            quantization is per-tensor. In this case, we perform a mock FP8xFP8 matmul.
+            """
             # fp8 weight tensor for torchao
             qweight: AffineQuantizedTensor = self._construct_qweight_structure()
 
@@ -233,6 +242,30 @@ if available_packages["fms"] and available_packages["torchao"]:
                         torch.float32
                     )
                 qx = self._input_activation_quant_func_fp8(x, **input_quant_kwargs)
+
+                # Check if we need CPU fallback for per-channel quantization
+                is_cpu = qx.device.type == "cpu"
+                is_per_tensor = (
+                    self.linear_config["weights"]["strategy"] == "tensor"
+                    and self.linear_config["input_activations"]["strategy"] == "tensor"
+                )
+
+                # Perform mock FP8xFP8 matmul
+                if is_cpu and not is_per_tensor and not SUPPORTS_CPU_PER_CHANNEL_FP8:
+                    # Check torchao version without loading the full package
+                    if Version("0.11") < Version(version("torchao")):
+                        raise NotImplementedError(
+                            "Fallback path for FP8 matmul on CPU is not supported "
+                            "on torchao > 0.11."
+                        )
+                    x_dequant = qx.dequantize()
+                    w_dequant = qweight.dequantize()
+                    out = torch.nn.functional.linear(
+                        x_dequant.to(w_dequant.dtype),
+                        w_dequant,
+                        self.bias if self.has_bias else None,
+                    )
+                    return out.to(x.dtype)
 
                 # Copied from torchao _linear_fp8_act_fp8_weight_impl
                 # (with changes to support fp8 out)
@@ -276,10 +309,11 @@ if available_packages["fms"] and available_packages["torchao"]:
                 ).reshape(out_shape)
 
             # activations not quantized, dequant fp8 weight and do regular matmul
+            w_dequant = qweight.dequantize()
             out = torch.nn.functional.linear(
-                x, qweight.dequantize(), self.bias if self.has_bias else None
+                x.to(w_dequant.dtype), w_dequant, self.bias if self.has_bias else None
             )
-            return out
+            return out.to(x.dtype)
 
         def __repr__(self) -> str:
             return (
