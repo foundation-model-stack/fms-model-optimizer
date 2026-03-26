@@ -14,7 +14,6 @@
 """Implement FP8 linear module to be loaded via FMS."""
 
 # Standard
-from importlib.metadata import version
 from typing import Any, Mapping
 
 # Third Party
