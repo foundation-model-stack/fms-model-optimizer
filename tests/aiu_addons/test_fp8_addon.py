@@ -13,13 +13,21 @@
 # limitations under the License.
 """Test suite for FMS addon introducing FP8 functionalities"""
 
+# Standard
+import warnings
+
 # Third Party
 import pytest
 import torch
 
 # Local
 from fms_mo.prep import available_packages
+
+# Suppress the UserWarning about overriding kernel registration in PyTorch 2.8+
+# This warning is expected when we override the native CPU kernel for _scaled_mm
+warnings.simplefilter("ignore", UserWarning)
 import fms_mo.aiu_addons.fp8.fp8_spyre_op  # pylint: disable=unused-import
+warnings.simplefilter("default", UserWarning)  # Reset to default after import
 
 # ============================================================================
 # Constants
