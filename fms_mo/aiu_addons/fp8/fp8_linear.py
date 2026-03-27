@@ -29,7 +29,6 @@ from fms_mo.prep import available_packages
 # open issue in PyLint: https://github.com/pytorch/pytorch/issues/119482
 
 TORCH_VERSION = Version(torch.__version__.split("+")[0])
-SUPPORTS_CPU_PER_CHANNEL_FP8 = Version("2.10") > TORCH_VERSION
 
 # Gated torchao imports for FP8 implementation
 if available_packages["fms"] and available_packages["torchao"]:
