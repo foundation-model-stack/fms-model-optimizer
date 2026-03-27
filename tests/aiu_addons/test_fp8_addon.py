@@ -170,9 +170,6 @@ def test_fp8_linear_cpu_support(  # pylint: disable=redefined-outer-name
     - Per-tensor quantization (weights and activations both per-tensor)
     - Per-channel quantization (weights and activations both per-channel/per-token)
 
-    Note: Mixed granularity (e.g., per-tensor weights with per-token activations)
-    is not supported on the target custom hardware.
-
     Args:
         weight_strategy: "tensor" or "channel" weight quantization
         activation_strategy: "tensor" or "token" dynamic activation quantization
