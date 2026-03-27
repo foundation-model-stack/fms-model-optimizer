@@ -50,8 +50,7 @@ def _scaled_mm_cpu_out(
     mat2 = (mat2.to(dtype=out_dtype) * scale2).to(dtype=out_dtype)
 
     if bias is not None:
-        bias_converted = bias.to(dtype=out_dtype)
-        ret = torch.addmm(bias_converted, mat1, mat2)
+        ret = torch.addmm(bias.to(dtype=out_dtype), mat1, mat2)
     else:
         ret = torch.mm(mat1, mat2)
 
