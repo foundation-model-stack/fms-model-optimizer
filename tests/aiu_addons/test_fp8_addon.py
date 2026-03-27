@@ -26,7 +26,9 @@ from fms_mo.prep import available_packages
 # Suppress the UserWarning about overriding kernel registration in PyTorch 2.8+
 # This warning is expected when we override the native CPU kernel for _scaled_mm
 warnings.simplefilter("ignore", UserWarning)
-import fms_mo.aiu_addons.fp8.fp8_spyre_op  # pylint: disable=unused-import
+# Local
+import fms_mo.aiu_addons.fp8.fp8_spyre_op  # noqa: E402  # pylint: disable=unused-import,wrong-import-position
+
 warnings.simplefilter("default", UserWarning)  # Reset to default after import
 
 # ============================================================================
@@ -154,8 +156,6 @@ def test_fp8_op() -> None:
     "weight_strategy,activation_strategy",
     [
         ("tensor", "tensor"),  # Per-tensor W + per-tensor dynamic A
-        ("tensor", "token"),  # Per-tensor W + per-token dynamic A
-        ("channel", "tensor"),  # Per-channel W + per-tensor dynamic A
         ("channel", "token"),  # Per-channel W + per-token dynamic A
     ],
 )
@@ -164,14 +164,14 @@ def test_fp8_linear_cpu_support(  # pylint: disable=redefined-outer-name
     activation_strategy: str,
     fp8_test_dimensions: dict,
 ) -> None:
-    """Test FP8Linear on CPU with different quantization strategies.
+    """Test FP8Linear on CPU with supported quantization strategies.
 
     This test ensures that FP8Linear works correctly on CPU with:
-    - Per-tensor quantization (native support in PyTorch 2.10+)
-    - Per-channel/per-token quantization (uses fallback path in PyTorch 2.10+)
+    - Per-tensor quantization (weights and activations both per-tensor)
+    - Per-channel quantization (weights and activations both per-channel/per-token)
 
-    Note: PyTorch 2.10+ only supports per-tensor FP8 matmul on CPU. Per-channel
-    and per-token quantization require a fallback to dequantize + regular matmul.
+    Note: Mixed granularity (e.g., per-tensor weights with per-token activations)
+    is not supported on the target custom hardware.
 
     Args:
         weight_strategy: "tensor" or "channel" weight quantization

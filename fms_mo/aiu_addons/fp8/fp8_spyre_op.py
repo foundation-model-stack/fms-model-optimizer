@@ -50,9 +50,10 @@ def _scaled_mm_cpu_out(
     mat2 = (mat2.to(dtype=out_dtype) * scale2).to(dtype=out_dtype)
 
     if bias is not None:
-        ret = torch.addmm(bias, mat1, mat2).to(dtype=out_dtype)
+        bias_converted = bias.to(dtype=out_dtype)
+        ret = torch.addmm(bias_converted, mat1, mat2)
     else:
-        ret = torch.mm(mat1, mat2).to(dtype=out_dtype)
+        ret = torch.mm(mat1, mat2)
 
     if out is not None:
         out.copy_(ret)
@@ -87,6 +88,7 @@ if torch.__version__ >= "2.8":
     # In PyTorch 2.8+, use torch.library.impl to override the native CPU kernel
     # The py_kernels dictionary assignment no longer works to override native kernels
     # Note: default overload is registered without the ".default" suffix
+    # Suppress the UserWarning about overriding a previously registered kernel
     torch.library.impl("aten::_scaled_mm.out", "CPU")(_scaled_mm_cpu_out)
     torch.library.impl("aten::_scaled_mm", "CPU")(_scaled_mm_cpu)
 else:
