@@ -242,7 +242,6 @@ def _validate_termination_files_when_quantization_succeeds(base_dir):
     """Check whether the termination log and .complete files exists"""
     assert os.path.exists(os.path.join(base_dir, "/termination-log")) is False
     assert os.path.exists(os.path.join(base_dir, ".complete")) is True
-    # assert os.path.exists(os.path.join(base_dir, training_logs_filename)) is True
 
 
 def _validate_quantization_output(base_dir, quant_method):
@@ -256,7 +255,6 @@ def _validate_quantization_output(base_dir, quant_method):
         assert os.path.exists(os.path.join(base_dir, "special_tokens_map.json")) is True
 
     assert os.path.exists(os.path.join(base_dir, "tokenizer_config.json")) is True
-    # assert os.path.exists(os.path.join(base_dir, "tokenizer.model")) is True
 
     # Check quantized model files exist
     if quant_method == "gptq":
