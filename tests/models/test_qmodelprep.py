@@ -272,6 +272,10 @@ def test_vit_dynamo(
     qmodule_error(model_vit, 2, 36)
 
 
+@pytest.mark.skipif(
+    not available_packages["torchvision"],
+    reason="Requires torchvision",
+)
 def test_resnet18(
     model_resnet18,
     batch_resnet18,
@@ -290,6 +294,10 @@ def test_resnet18(
     qmodule_error(model_resnet18, 4, 17)
 
 
+@pytest.mark.skipif(
+    not available_packages["torchvision"],
+    reason="Requires torchvision",
+)
 def test_vit_base(
     model_vit_base,
     batch_vit_base,
