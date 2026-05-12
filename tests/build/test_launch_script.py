@@ -250,7 +250,9 @@ def _validate_quantization_output(base_dir, quant_method):
     assert os.path.exists(os.path.join(base_dir, "tokenizer.json")) is True
 
     # special_tokens_map.json is optional in transformers 5.0+ for some tokenizers
-    transformers_version = tuple(int(x) for x in transformers.__version__.split(".")[:2])
+    transformers_version = tuple(
+        int(x) for x in transformers.__version__.split(".")[:2]
+    )
     if transformers_version < (5, 0):
         assert os.path.exists(os.path.join(base_dir, "special_tokens_map.json")) is True
 

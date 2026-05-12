@@ -1304,7 +1304,9 @@ def model_bert():
         transformers.models.bert.modeling_bert.BertModel: BERT model
     """
     # torchscript parameter removed in transformers 5.0
-    transformers_version = tuple(int(x) for x in transformers.__version__.split(".")[:2])
+    transformers_version = tuple(
+        int(x) for x in transformers.__version__.split(".")[:2]
+    )
     if transformers_version >= (5, 0):
         return BertModel.from_pretrained("google-bert/bert-base-uncased")
     return BertModel.from_pretrained("google-bert/bert-base-uncased", torchscript=True)
@@ -1319,7 +1321,9 @@ def model_bert_eager():
         transformers.models.bert.modeling_bert.BertModel: BERT model
     """
     # torchscript parameter removed in transformers 5.0
-    transformers_version = tuple(int(x) for x in transformers.__version__.split(".")[:2])
+    transformers_version = tuple(
+        int(x) for x in transformers.__version__.split(".")[:2]
+    )
     if transformers_version >= (5, 0):
         return BertModel.from_pretrained(
             "google-bert/bert-base-uncased", attn_implementation="eager"
