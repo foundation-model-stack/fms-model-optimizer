@@ -22,6 +22,7 @@ import glob
 # Third Party
 import pytest
 import torch
+import transformers
 
 # First Party
 from build.accelerate_launch import main
@@ -248,7 +249,12 @@ def _validate_quantization_output(base_dir, quant_method):
     """Check whether the tokenizer and quantized model artifacts exists"""
     # Check tokenizer files exist
     assert os.path.exists(os.path.join(base_dir, "tokenizer.json")) is True
-    assert os.path.exists(os.path.join(base_dir, "special_tokens_map.json")) is True
+
+    # special_tokens_map.json is optional in transformers 5.0+ for some tokenizers
+    transformers_version = tuple(int(x) for x in transformers.__version__.split(".")[:2])
+    if transformers_version < (5, 0):
+        assert os.path.exists(os.path.join(base_dir, "special_tokens_map.json")) is True
+
     assert os.path.exists(os.path.join(base_dir, "tokenizer_config.json")) is True
     # assert os.path.exists(os.path.join(base_dir, "tokenizer.model")) is True
 
