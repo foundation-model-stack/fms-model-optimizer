@@ -41,7 +41,7 @@ FMS Model Optimizer is a framework for developing reduced precision neural netwo
 
 *Optional packages based on optimization functionality required:*
 
-- **GPTQ** is a popular compression method for LLMs: 
+- **GPTQ** is a popular compression method for LLMs:
     - [gptqmodel](https://pypi.org/project/gptqmodel/) or build from [source](https://github.com/ModelCloud/GPTQModel)
 - If you want to experiment with **INT8** deployment in [QAT](./examples/QAT_INT8/) and [PTQ](./examples/PTQ_INT8/) examples:
     - Nvidia GPU with compute capability > 8.0 (A100 family or higher)
@@ -100,7 +100,8 @@ pip install -e .
 
 #### Optional Dependencies
 The following optional dependencies are available:
-- `fp8`: `llmcompressor` package for fp8 quantization
+- `fp8`: `llmcompressor` and `torchao` packages for fp8 quantization and inference
+- `fp8-infer`: `torchao` package for fp8 inference
 - `gptq`: `GPTQModel` package for W4A16 quantization
 - `mx`: `microxcaling` package for MX quantization
 - `opt`: Shortcut for `fp8`, `gptq`, and `mx` installs
