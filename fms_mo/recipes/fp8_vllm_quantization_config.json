@@ -1,0 +1,44 @@
+{
+"quantization_config": {
+    "config_groups": {
+      "group_0": {
+        "input_activations": {
+          "actorder": null,
+          "block_structure": null,
+          "dynamic": true,
+          "group_size": null,
+          "num_bits": 8,
+          "observer": null,
+          "observer_kwargs": {},
+          "strategy": "token",
+          "symmetric": true,
+          "type": "float"
+        },
+        "output_activations": null,
+        "targets": [
+          "Linear"
+        ],
+        "weights": {
+          "actorder": null,
+          "block_structure": null,
+          "dynamic": false,
+          "group_size": null,
+          "num_bits": 8,
+          "observer": "minmax",
+          "observer_kwargs": {},
+          "strategy": "channel",
+          "symmetric": true,
+          "type": "float"
+        }
+      }
+    },
+    "format": "float-quantized",
+    "global_compression_ratio": null,
+    "ignore": [
+      "lm_head"
+    ],
+    "kv_cache_scheme": null,
+    "quant_method": "compressed-tensors",
+    "quantization_status": "compressed"
+  }
+}
