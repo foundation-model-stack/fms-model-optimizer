@@ -791,7 +791,13 @@ def imatmul_ops_reg(
 
     @kernel_impl("fms_mo::q_per_t_sym", "default")
     def q_per_t(x, s, zp):
-        return torch.quantize_per_tensor(x, s, zp, torch.qint8).int_repr()
+        # NOTE torch.quantize_per_tensor is deprecated (pytorch/pytorch#184982); this
+        # mirrors it (reciprocal multiply in fp32, round half-to-even, saturate to int8).
+        return (
+            (torch.round(x * torch.as_tensor(s).to(x.dtype).reciprocal()) + zp)
+            .clamp(-128, 127)
+            .to(torch.int8)
+        )
 
     @reg_fake("fms_mo::q_per_t_sym")
     def q_per_t_abstract(x, s, zp):

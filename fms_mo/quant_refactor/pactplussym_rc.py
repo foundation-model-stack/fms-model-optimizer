@@ -312,10 +312,13 @@ class PACTplusExtendRangeSTE_PTnative(torch.autograd.Function):
                 quant_max=qint_h,
             ).to(input_tensor.dtype)
         else:
-            qint_dtype = torch.qint8
+            # NOTE torch.quantize_per_tensor is deprecated (pytorch/pytorch#184982);
+            # mirror it with plain arithmetic (reciprocal multiply in fp32, round
+            # half-to-even, saturate to int8) instead.
             output = (
-                torch.quantize_per_tensor(input_tensor, scale, zero_point, qint_dtype)
-                .int_repr()
+                (torch.round(input_tensor * scale.reciprocal()) + zero_point)
+                .clamp(-128, 127)
+                .to(torch.int8)
                 .clamp(qint_l, qint_h)
             )
         return output

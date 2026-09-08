@@ -1051,12 +1051,16 @@ class QLinearINT8Deploy(nn.Linear):
         Returns:
             Tensor: Quantized tensor with values in the range [-128, 127].
         """
-        return torch.quantize_per_tensor(
-            x.float(),
-            self.input_scale,
-            self.input_zp - 128 + self.useSymAct,
-            torch.qint8,
-        ).int_repr()
+        # NOTE torch.quantize_per_tensor is deprecated (pytorch/pytorch#184982); this
+        # mirrors it (reciprocal multiply in fp32, round half-to-even, saturate to int8).
+        return (
+            (
+                torch.round(x.float() * self.input_scale.float().reciprocal())
+                + (self.input_zp - 128 + self.useSymAct)
+            )
+            .clamp(-128, 127)
+            .to(torch.int8)
+        )
 
     def qa_raw_qfunc(self, x):
         """
