@@ -26,11 +26,7 @@ import logging
 import torch
 
 # Local
-from fms_mo.quant_refactor.base_quant import (
-    _DTYPE_RANGES,
-    _INT_REPR_DTYPES,
-    Qscheme,
-)
+from fms_mo.quant_refactor.base_quant import _DTYPE_RANGES, _INT_REPR_DTYPES, Qscheme
 from fms_mo.quant_refactor.sawb_utils import sawb_params, sawb_params_code
 
 logger = logging.getLogger(__name__)
