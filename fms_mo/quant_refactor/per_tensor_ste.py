@@ -26,6 +26,7 @@ from typing import Tuple
 import torch
 
 # Local
+from fms_mo.quant_refactor.base_quant import _DTYPE_RANGES, _INT_REPR_DTYPES
 from fms_mo.quant_refactor.linear_utils import (
     asymmetric_linear_quantization_params,
     linear_quantization,
@@ -335,9 +336,15 @@ class PerTensorSTE_PTnative(torch.autograd.Function):
                 quant_max=qint_h,
             ).to(input_tensor.dtype)
         else:
+            # NOTE torch.quantize_per_tensor is deprecated (pytorch/pytorch#184982);
+            # mirror it with plain arithmetic (reciprocal multiply in fp32, round
+            # half-to-even, saturate to the storage dtype) instead.
+            dtype_l, dtype_h = _DTYPE_RANGES[qint_dtype]
             output = (
-                torch.quantize_per_tensor(input_tensor, scale, zero_point, qint_dtype)
-                .int_repr()
+                (torch.round(input_tensor * scale.reciprocal()) + zero_point)
+                .to(torch.float64)
+                .clamp(dtype_l, dtype_h)
+                .to(_INT_REPR_DTYPES[qint_dtype])
                 .clamp(qint_l, qint_h)
             )
         return output

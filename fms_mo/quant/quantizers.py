@@ -42,6 +42,16 @@ import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 
+# dtype that .int_repr() returned for each deprecated quantized dtype, used to reproduce
+# torch.quantize_per_tensor/_per_channel without the deprecated ops
+# (pytorch/pytorch#184982).
+_INT_REPR_DTYPES = {
+    torch.qint32: torch.int32,
+    torch.qint8: torch.int8,
+    torch.quint8: torch.uint8,
+    torch.int32: torch.int32,
+}
+
 
 def get_activation_quantizer(
     qa_mode="PACT",
@@ -555,12 +565,14 @@ class SAWBPlusZeroPerChSTE(torch.autograd.Function):
                 clip_val.dtype
             )  # NOTE return will be a fp32 tensor; function only support float()
         else:
+            # NOTE torch.quantize_per_channel is deprecated (pytorch/pytorch#184982), use
+            # plain arithmetic instead. zero_point is always 0 here, so it drops out.
+            # torch.round matches the deprecated op's round-half-to-even tie-breaking.
+            scale_bcast = scale.reshape([-1] + [1] * (input_tensor.dim() - 1))
             output = (
-                torch.quantize_per_channel(
-                    input_tensor, scale, zero_point, 0, torch.qint8
-                )
-                .int_repr()
+                torch.round(input_tensor / scale_bcast)
                 .clamp(int_l, int_u)
+                .to(torch.int8)
             )
             # NOTE return will be a torch.int8 tensor
 
@@ -1563,13 +1575,15 @@ class PACT2_STE(torch.autograd.Function):
                 )
                 out = out.to(input_tensor_dtype)
             else:
+                # NOTE torch.quantize_per_tensor is deprecated (pytorch/pytorch#184982);
+                # quantize with plain arithmetic instead. The deprecated kernel multiplied
+                # by the reciprocal of the scale in fp32 and rounded half-to-even; mirror
+                # that exactly, since these results are compared against TorchQuantizer.
                 # Clamp to [quant_min, quant_max] in case we are storing int4 into a uint8 tensor
                 out = (
-                    torch.quantize_per_tensor(
-                        input_tensor, scale.float(), zp, qint_dtype
-                    )
-                    .int_repr()
+                    (torch.round(input_tensor * scale.float().reciprocal()) + zp)
                     .clamp(quant_min, quant_max)
+                    .to(_INT_REPR_DTYPES[qint_dtype])
                 )
             return out
             # NOTE remember scale and zp from asym_lin_q_params is different from
@@ -2030,13 +2044,15 @@ class PACTplus2STE(torch.autograd.Function):
                 )
                 out = out.to(input_tensor_dtype)
             else:
+                # NOTE torch.quantize_per_tensor is deprecated (pytorch/pytorch#184982);
+                # quantize with plain arithmetic instead. The deprecated kernel multiplied
+                # by the reciprocal of the scale in fp32 and rounded half-to-even; mirror
+                # that exactly, since these results are compared against TorchQuantizer.
                 # Clamp to [quant_min, quant_max] in case we are storing quint4 into a uint8 tensor
                 out = (
-                    torch.quantize_per_tensor(
-                        input_tensor, scale.float(), zp, qint_dtype
-                    )
-                    .int_repr()
+                    (torch.round(input_tensor * scale.float().reciprocal()) + zp)
                     .clamp(quant_min, quant_max)
+                    .to(_INT_REPR_DTYPES[qint_dtype])
                 )
             return out  # do not cast back to input_tensor_dtype!
 

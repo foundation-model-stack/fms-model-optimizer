@@ -35,6 +35,9 @@ import torch.fx
 import torch.nn as nn
 import torch.nn.functional as F
 
+# Local
+from fms_mo.quant_refactor.base_quant import _DTYPE_RANGES, _INT_REPR_DTYPES
+
 logger = logging.getLogger(__name__)
 
 
@@ -557,9 +560,17 @@ class SAWBPlusZeroPerChSTE(torch.autograd.Function):
                 clip_val.dtype
             )  # NOTE return will be a fp32 tensor; function only support float()
         else:
+            # NOTE torch.quantize_per_channel is deprecated (pytorch/pytorch#184982);
+            # mirror it with plain arithmetic (reciprocal multiply in fp32, round
+            # half-to-even, saturate to int8) instead.
+            bcast = [-1] + [1] * (input.dim() - 1)
             output = (
-                torch.quantize_per_channel(input, scale, zero_point, 0, torch.qint8)
-                .int_repr()
+                (
+                    torch.round(input * scale.reciprocal().reshape(bcast))
+                    + zero_point.reshape(bcast)
+                )
+                .clamp(-128, 127)
+                .to(torch.int8)
                 .clamp(int_l, int_u)
             )
             # NOTE return will be a torch.int8 tensor
@@ -1561,9 +1572,15 @@ class PACT2_STE(torch.autograd.Function):
                 return out.to(input_dtype)
             else:
                 # Clamp to [quant_min, quant_max] in case we are storing int4 into a uint8 tensor
+                # NOTE torch.quantize_per_tensor is deprecated (pytorch/pytorch#184982);
+                # mirror it with plain arithmetic (reciprocal multiply in fp32, round
+                # half-to-even, saturate to the storage dtype) instead.
+                dtype_l, dtype_h = _DTYPE_RANGES[qint_dtype]
                 out = (
-                    torch.quantize_per_tensor(input, scale.float(), zp, qint_dtype)
-                    .int_repr()
+                    (torch.round(input * scale.float().reciprocal()) + zp)
+                    .to(torch.float64)
+                    .clamp(dtype_l, dtype_h)
+                    .to(_INT_REPR_DTYPES[qint_dtype])
                     .clamp(quant_min, quant_max)
                 )
                 return out  # do not cast back to input_dtype!
@@ -1979,11 +1996,15 @@ class PACTplus2STE(torch.autograd.Function):
                 return out.to(input_dtype)
             else:
                 # Clamp to [quant_min, quant_max] in case we are storing quint4 into a uint8 tensor
+                # NOTE torch.quantize_per_tensor is deprecated (pytorch/pytorch#184982);
+                # mirror it with plain arithmetic (reciprocal multiply in fp32, round
+                # half-to-even, saturate to the storage dtype) instead.
+                dtype_l, dtype_h = _DTYPE_RANGES[qint_dtype]
                 out = (
-                    torch.quantize_per_tensor(
-                        input, scale.float(), zero_point, qint_dtype
-                    )
-                    .int_repr()
+                    (torch.round(input * scale.float().reciprocal()) + zero_point)
+                    .to(torch.float64)
+                    .clamp(dtype_l, dtype_h)
+                    .to(_INT_REPR_DTYPES[qint_dtype])
                     .clamp(quant_min, quant_max)
                 )
                 return out  # do not cast back to input_dtype!
@@ -3122,15 +3143,19 @@ class QmaxPerChSTE(torch.autograd.Function):
                 quant_max=int_u,
             ).to(input.dtype)
         else:
+            # NOTE torch.quantize_per_channel is deprecated (pytorch/pytorch#184982);
+            # mirror it with plain arithmetic (reciprocal multiply in fp32, round
+            # half-to-even, saturate to int8) instead.
+            bcast = [-1] + [1] * (input.dim() - 1)
             output = (
-                torch.quantize_per_channel(
-                    input.float(),
-                    scale.float(),
-                    zero_point.float(),
-                    axis=0,
-                    dtype=torch.qint8,
+                (
+                    torch.round(
+                        input.float() * scale.float().reciprocal().reshape(bcast)
+                    )
+                    + zero_point.float().reshape(bcast)
                 )
-                .int_repr()
+                .clamp(-128, 127)
+                .to(torch.int8)
                 .clamp(int_l, int_u)
             )
 

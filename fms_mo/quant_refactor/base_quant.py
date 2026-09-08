@@ -26,6 +26,22 @@ from dataclasses import dataclass
 # Third Party
 import torch
 
+# The deprecated torch.quantize_per_tensor/_per_channel ops (pytorch/pytorch#184982)
+# saturated to the storage dtype's range and int_repr() returned these dtypes. Kept here
+# so the plain-arithmetic replacements reproduce that behavior exactly.
+_INT_REPR_DTYPES = {
+    torch.qint32: torch.int32,
+    torch.qint8: torch.int8,
+    torch.quint8: torch.uint8,
+    torch.int32: torch.int32,
+}
+_DTYPE_RANGES = {
+    torch.qint32: (-(2**31), 2**31 - 1),
+    torch.qint8: (-128, 127),
+    torch.quint8: (0, 255),
+    torch.int32: (-(2**31), 2**31 - 1),
+}
+
 
 @dataclass
 class Qscheme:

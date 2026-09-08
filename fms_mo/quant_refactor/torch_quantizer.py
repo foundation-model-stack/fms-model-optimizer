@@ -26,7 +26,7 @@ import logging
 import torch
 
 # Local
-from fms_mo.quant_refactor.base_quant import Qscheme
+from fms_mo.quant_refactor.base_quant import _DTYPE_RANGES, _INT_REPR_DTYPES, Qscheme
 from fms_mo.quant_refactor.sawb_utils import sawb_params, sawb_params_code
 
 logger = logging.getLogger(__name__)
@@ -277,6 +277,20 @@ class TorchQuantizer(torch.nn.Module):
             (self.num_bits_int, signed)
         )  # NOTE .item() won't work for perCh
 
+    def _broadcast_qparams(self, ndim: int):
+        """
+        Reshape perCh scale/zero_point so they broadcast along qscheme.axis.
+
+        Args:
+            ndim (int): Number of dimensions of the tensor being quantized.
+
+        Returns:
+            [torch.Tensor, torch.Tensor]: Broadcastable scale and zero_point.
+        """
+        shape = [1] * ndim
+        shape[self.qscheme.axis] = -1
+        return self.scale.reshape(shape), self.zero_point.reshape(shape)
+
     def forward(self, tensor: torch.Tensor):
         """
         TorchQuantizer forward() function w/ PT kernels.
@@ -314,27 +328,32 @@ class TorchQuantizer(torch.nn.Module):
         else:
             dtype = self.get_torch_dtype()
             if dtype:
+                # NOTE torch.quantize_per_tensor/_per_channel are deprecated
+                # (pytorch/pytorch#184982), so quantize with plain arithmetic instead.
+                # This class is the reference result for the quantizer tests, so the
+                # arithmetic mirrors the deprecated kernels bit-for-bit: they multiply
+                # by the reciprocal of the scale in fp32 (NOT divide -- that is slightly
+                # more accurate and would shift the reference), round half-to-even, and
+                # saturate to the storage dtype range before the clamp below.
                 if self.qscheme.q_unit == "perCh":
-                    output = torch.quantize_per_channel(
-                        tensor,
-                        self.scale,
-                        self.zero_point,
-                        self.qscheme.axis,
-                        dtype,
-                    )
+                    scale, zero_point = self._broadcast_qparams(tensor.dim())
                 elif self.qscheme.q_unit == "perGrp":
                     raise RuntimeError(
                         "TorchQuantizer forward not implemented for perGrp"
                     )
                 else:  # Per Tensor
-                    output = torch.quantize_per_tensor(
-                        tensor,
-                        self.scale,
-                        self.zero_point,
-                        dtype,
-                    )
+                    scale, zero_point = self.scale, self.zero_point
+                dtype_min, dtype_max = _DTYPE_RANGES[dtype]
+                # NOTE clamp in float64: qint32's bounds are not representable in
+                # float32, so clamping there would overflow on cast.
+                output = (
+                    (torch.round(tensor * scale.reciprocal()) + zero_point)
+                    .to(torch.float64)
+                    .clamp(dtype_min, dtype_max)
+                    .to(_INT_REPR_DTYPES[dtype])
+                )
                 # Clamp required if storing int4 into int8 tensor (no PT support for int4)
-                output = output.int_repr().clamp(self.quant_min, self.quant_max)
+                output = output.clamp(self.quant_min, self.quant_max)
             else:
                 raise RuntimeError(
                     f"num_bits {self.num_bits} and sign {(self.zero_point==0).item()}"

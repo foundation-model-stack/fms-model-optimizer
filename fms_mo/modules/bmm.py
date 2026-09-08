@@ -685,7 +685,13 @@ class QBmmINT8Deploy(nn.Module):
         Returns:
             Tensor: The quantized tensor.
         """
-        return torch.quantize_per_tensor(x.float(), scale, zp, torch.qint8).int_repr()
+        # NOTE torch.quantize_per_tensor is deprecated (pytorch/pytorch#184982); this
+        # mirrors it (reciprocal multiply in fp32, round half-to-even, saturate to int8).
+        return (
+            (torch.round(x.float() * torch.as_tensor(scale).float().reciprocal()) + zp)
+            .clamp(-128, 127)
+            .to(torch.int8)
+        )
 
     def qfunc_raw(self, x, scale, zp):
         """
