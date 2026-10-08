@@ -391,11 +391,19 @@ def make_quant_module(module, curr_full_name, qcfg, verbose=False):
     # For nn.Linear
     elif isinstance(module, nn.Linear):
         if module.__class__ != nn.Linear:
-            logger.warning(
-                f"{curr_full_name} {type(module)} seems to be a wrapper of Linear."
-                "Please make sure it doesn't wrap BN and activ func."
-                "Otherwise please create an equivalen Linear wrapper and change qcfg['mapping']."
-            )
+            if available_packages["compressed_tensors"]:
+                # Third Party
+                import compressed_tensors
+            # checks if the layer is CompressedLinear. If it is a CompressedLinear layer,
+            # it does nothing. Otherwise, it throws the warning sign
+            if not isinstance(
+                module, compressed_tensors.linear.compressed_linear.CompressedLinear
+            ):
+                logger.warning(
+                    f"{curr_full_name} {type(module)} seems to be a wrapper of Linear."
+                    "Please make sure it doesn't wrap BN and activ func. Otherwise"
+                    "please create an equivalent Linear wrapper and change qcfg['mapping']."
+                )
 
         QLin = mapping.get(nn.Linear, None)
         if QLin is None:
@@ -571,6 +579,42 @@ def has_quantized_module(model):
     return any(isinstance(m, quantized_modules) for m in model.modules())
 
 
+def swap_qbmm(model: nn.Module, qcfg: dict):
+    """Go through all model.named_modules(), try to create an equivalent
+    Qbmm layer to replace each of the existing linear Bmm layers.
+
+    Args:
+        model (nn.Module): input model to be "prepared"
+        qcfg (dict): quant config
+
+    Returns: updated model is returned with the Qbmm added
+
+    """
+
+    # Local
+    from fms_mo.modules import QBmm
+
+    qcfg["which2patch_contextmanager"] = qcfg["bmm_prep"]["which2patch_contextmanager"]
+    isbmm = qcfg["which2patch_contextmanager"] == "torch.bmm"
+    for mod_name, line_nums in qcfg["bmm_prep"]["layers_with_bmm"].items():
+        mod_bmm_happened = model.get_submodule(mod_name)
+        for whichQBmm, ln in enumerate(line_nums, start=1):
+            nbits = qcfg[f"nbits_bmm{whichQBmm}"]
+            newQBmm = QBmm(
+                num_bits_m1=max(nbits, 8) if whichQBmm == 2 else nbits,
+                num_bits_m2=nbits,
+                qm1_mode=qcfg[f"bmm{whichQBmm}_qm1_mode"],
+                qm2_mode=qcfg[f"bmm{whichQBmm}_qm2_mode"],
+                m1_unidirectional=(whichQBmm == 2),
+                m1_bounded=(whichQBmm == 2),  # see Note 5
+                m2_unidirectional=False,
+                m2_bounded=False,
+                replaceBmm=isbmm,
+                qcfg=qcfg,
+            )
+            setattr(mod_bmm_happened, f"QBmm{ln}", newQBmm)
+
+
 def qmodel_prep(
     model,
     dloader,
@@ -657,6 +701,12 @@ def qmodel_prep(
     Returns:
         nn.Module: quantized model ready for further PTQ/QAT
     """
+    if qcfg["fp8_inference"]:
+        if qcfg.get("QBmm"):
+            swap_qbmm(model, qcfg)
+
+        model = q_any_net_5(model, qcfg, verbose=False)
+        return model
 
     sys.setrecursionlimit(4000)
 
@@ -906,8 +956,10 @@ def qmodel_prep(
         model = torch.nn.parallel.DistributedDataParallel(
             model, device_ids=DPorDDPdevices
         )
-
-    qconfig_save(qcfg, fname="qcfg.json")
+    if qcfg["output_folder"] is None:
+        qconfig_save(qcfg, fname="qcfg.json")
+    else:
+        qconfig_save(qcfg, fname=qcfg["output_folder"] + "/qcfg.json")
     qcfg["tb_writer"] = tb_writer
 
     logger.info(f"--- Quantized model --- \n{model}\n")
