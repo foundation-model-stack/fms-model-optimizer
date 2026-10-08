@@ -178,6 +178,8 @@ class FMSMOArguments(TypeChecker):
     bmm2_qm1_mode: str = field(default="pact", metadata={"help": ("bmm2.m1 quanitzer")})
     bmm2_qm2_mode: str = field(default="pact", metadata={"help": ("bmm2.m1 quanitzer")})
     smoothq_alpha: float = field(default=0.65, metadata={"help": "smooth quant alpha"})
+    smooth_attn_alpha: float = field(default=0.5, metadata={"help": "smooth attention alpha"})
+    smooth_attn: bool = field(default=False, metadata={"help": "enable smooth attention"})
     qmodel_calibration: int = field(
         default=0,
         metadata={"help": "Num of batches for Qmodel calibration, using model copy."},
