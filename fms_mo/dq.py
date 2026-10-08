@@ -23,7 +23,6 @@ from pathlib import Path
 import logging
 
 # Third Party
-from datasets import load_from_disk
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import (
@@ -50,6 +49,15 @@ from fms_mo.utils.aiu_utils import save_for_aiu
 from fms_mo.utils.dq_utils import config_quantize_smooth_layers
 from fms_mo.utils.eval_utils import Evaluator, eval_llm_1GPU
 from fms_mo.utils.utils import patch_torch_bmm, prepare_input
+
+try:
+    # Third Party
+    from datasets import load_from_disk
+except ImportError as e:
+    raise ImportError(
+        "The `datasets` package is required for data loading. Install it with "
+        "`pip install fms-model-optimizer[data]`."
+    ) from e
 
 logger = logging.getLogger(__name__)
 

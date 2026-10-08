@@ -104,7 +104,9 @@ The following optional dependencies are available:
 - `fp8-infer`: `torchao` package for fp8 inference
 - `gptq`: `GPTQModel` package for W4A16 quantization
 - `mx`: `microxcaling` package for MX quantization
-- `opt`: Shortcut for `fp8`, `gptq`, and `mx` installs
+- `data`: `datasets` package for loading calibration data (required by `fms_mo.run_quant` and direct quantization)
+- `launcher`: `accelerate` package for the multi-GPU launcher in `build/`
+- `opt`: Shortcut for `fp8`, `gptq`, `mx`, `data`, and `launcher` installs
 - `aiu`: `ibm-fms` package for AIU model deployment
 - `torchvision`: `torch` package for image recognition training and inference
 - `triton`: `triton` package for matrix multiplication kernels

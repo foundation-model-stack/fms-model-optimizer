@@ -33,7 +33,6 @@ import time
 import traceback
 
 # Third Party
-from datasets import load_from_disk
 from torch.cuda import OutOfMemoryError
 from transformers import (
     AutoModelForMaskedLM,
@@ -61,6 +60,15 @@ from fms_mo.utils.error_logging import (
 )
 from fms_mo.utils.import_utils import available_packages
 from fms_mo.utils.logging_utils import set_log_level
+
+try:
+    # Third Party
+    from datasets import load_from_disk
+except ImportError as e:
+    raise ImportError(
+        "The `datasets` package is required for data loading. Install it with "
+        "`pip install fms-model-optimizer[data]`."
+    ) from e
 
 
 def quantize(

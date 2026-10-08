@@ -25,10 +25,18 @@ import os
 import random
 
 # Third Party
-from datasets import load_dataset, load_from_disk
 from transformers import AutoTokenizer, BatchEncoding
-import datasets
 import torch
+
+try:
+    # Third Party
+    from datasets import load_dataset, load_from_disk
+    import datasets
+except ImportError as e:
+    raise ImportError(
+        "The `datasets` package is required for data loading. Install it with "
+        "`pip install fms-model-optimizer[data]`."
+    ) from e
 
 
 def return_tokenized_samples(nsamples, trainenc, seqlen, sequential=False):
