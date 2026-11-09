@@ -1607,6 +1607,10 @@ def model_analyzer_ts(
             f"Context manager is set to intercept {quant_config['which2patch_contextmanager']}"
         )
         # if attention uses SDPA, it is traced as a single fused op, so no bmm/matmul is found
+        # NOTE: the substring "Likely SDPA is enabled" is asserted by these tests in
+        # tests/models/test_qmodelprep.py, keep them in sync if the message changes:
+        #   - test_torchscript_sdpa_warns_no_bmm
+        #   - test_torchscript_eager_no_sdpa_warning
         if num_qbmm_attached == 0 and reconstructed_graph.DFS(
             ["aten::scaled_dot_product_attention"]
         ):
