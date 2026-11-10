@@ -1606,6 +1606,19 @@ def model_analyzer_ts(
         logger.info(
             f"Context manager is set to intercept {quant_config['which2patch_contextmanager']}"
         )
+        # if attention uses SDPA, it is traced as a single fused op, so no bmm/matmul is found
+        # NOTE: the substring "Likely SDPA is enabled" is asserted by these tests in
+        # tests/models/test_qmodelprep.py, keep them in sync if the message changes:
+        #   - test_torchscript_sdpa_warns_no_bmm
+        #   - test_torchscript_eager_no_sdpa_warning
+        if num_qbmm_attached == 0 and reconstructed_graph.DFS(
+            ["aten::scaled_dot_product_attention"]
+        ):
+            logger.warning(
+                "No bmm and matmul are found. Likely SDPA is enabled, so BMM quantization "
+                "(nbits_bmm1/nbits_bmm2) will be skipped. Load the model with "
+                'attn_implementation="eager" to quantize the attention matmuls.'
+            )
 
     # 1.2.6 sync QKV's clipval (or any linears that share parent)
     # here we identify the groups that share parent (at this point, they are still nn.Linear)

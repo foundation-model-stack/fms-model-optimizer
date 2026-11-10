@@ -16,6 +16,9 @@
 Test qmodel_prep functionality on Toy Models, Resnet50, Vision Transformer, and BERT
 """
 
+# Standard
+import logging
+
 # Third Party
 import pytest
 import torch
@@ -391,3 +394,71 @@ def test_bert_dynamo_wi_qbmm(
     assert all(
         m.num_module_called == 2 for m in other_qmodules
     ), "Modules other than QBmm were not called properly."
+
+
+def _tiny_bert_with_input(attn_implementation: str):
+    """
+    Create a small randomly initialized BERT (no download) and its input
+
+    Args:
+        attn_implementation (str): "eager" or "sdpa"
+
+    Returns:
+        tuple: BertModel and its input dict
+    """
+    config = transformers.BertConfig.from_dict(
+        {
+            "hidden_size": 64,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 2,
+            "intermediate_size": 128,
+            "vocab_size": 100,
+        }
+    )
+    model = transformers.BertModel._from_config(
+        config, attn_implementation=attn_implementation
+    ).eval()
+    inputs = {
+        "input_ids": torch.randint(0, 100, (1, 8)),
+        "attention_mask": torch.ones(1, 8, dtype=torch.long),
+    }
+    return model, inputs
+
+
+def test_torchscript_sdpa_warns_no_bmm(config_int8: dict, caplog):
+    """
+    With SDPA attention, TorchScript tracer finds no bmm/matmul to attach QBmm to, qmodel_prep
+    should warn the user instead of silently skipping BMM quantization.
+
+    Args:
+        config_int8 (dict): Recipe Config w/ int8 settings
+        caplog (pytest.LogCaptureFixture): captures log records
+    """
+    model, inputs = _tiny_bert_with_input("sdpa")
+    config_int8["nbits_bmm1"] = 8
+    config_int8["nbits_bmm2"] = 8
+
+    with caplog.at_level(logging.WARNING):
+        qmodel_prep(model, inputs, config_int8, use_dynamo=False)
+
+    assert "Likely SDPA is enabled" in caplog.text
+    assert not any("QBmm" in n for n, _ in model.named_modules())
+
+
+def test_torchscript_eager_no_sdpa_warning(config_int8: dict, caplog):
+    """
+    With eager attention, bmm/matmul are found and QBmm are attached, no SDPA warning expected.
+
+    Args:
+        config_int8 (dict): Recipe Config w/ int8 settings
+        caplog (pytest.LogCaptureFixture): captures log records
+    """
+    model, inputs = _tiny_bert_with_input("eager")
+    config_int8["nbits_bmm1"] = 8
+    config_int8["nbits_bmm2"] = 8
+
+    with caplog.at_level(logging.WARNING):
+        qmodel_prep(model, inputs, config_int8, use_dynamo=False)
+
+    assert "Likely SDPA is enabled" not in caplog.text
+    assert any("QBmm" in n for n, _ in model.named_modules())
